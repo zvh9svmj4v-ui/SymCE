@@ -1,0 +1,14 @@
+build/
+bin/
+obj/
+*.8xp
+*.8xv
+*.o
+.DS_Store
+vendor/
+__pycache__/
+*.pyc
+*.rom
+tools/emu/_*
+tools/emu/engtest/src/vectors.h
+!tools/emu/old/*.8xv
