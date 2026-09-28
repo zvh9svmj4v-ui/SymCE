@@ -75,6 +75,8 @@ X/3+.5                                          -> X/3+0.5
 X/4 with MODE ANSWERS: DEC                      -> 0.25X
 ENTER on the empty line right after 2X+2X       -> 4X again
 2nd ENTER        -> brings back 2X+2X, exactly as typed
+X^10+X^10                                       -> 2X^10
+X^X, X^X*X^X, 2^X*3                             -> X^X, (X^X)², 3*2^X
 ```
 
 Square roots of one term:
@@ -314,7 +316,7 @@ refuses rather than show a radian answer); e^, ln and polynomials give the
 same in both, and CENTRALDIFF (only substitution) works in both. Limits
 (`ERROR: SYMCE LIMIT`): a function inside another (`ln(sin(X))`,
 `sin(sin(X))`, `X^X`), ln or √ of a negative point (`DERIVAT(ln(X),X,-1)`), a point that is not a number (`DERIVAT(e^(X),X,ln(2))`),
-powers of 8 and up on the way (`DERIV(tan(X),X,7)`, `TAYLOR(1/(1+X²),X,3)`),
+powers of 16 and up on the way (`DERIV(X^20,X)`, `DERIV(tan(X),X,15)`),
 answers past 64 tokens (`TAYLOR(sin(X),X,3,1)`); answers too wide for the row
 are `TOO WIDE` (`CENTRALDIFF(sin(X),X,H)` in Classic; it fits in MathPrint).
 
@@ -402,7 +404,7 @@ way: `ERROR: SYMCE LIMIT` / `ANS`.
 These must be left to the stock OS, unchanged:
 
 ```
-2+2         -> 4                √(4), 1E3X, X^8     -> the OS's number
+2+2         -> 4                √(4), 1E3X, X^16    -> the OS's number
 prgmANYTHING -> runs it         X/0                 -> ERR: DIVIDE BY 0
 DelVar X, 5->X                  anything with no variable in it
 ```
@@ -517,6 +519,17 @@ The home-screen cursor is an **insert** cursor on the entry line.
   `CIRCUMCENTER`, `ORTHOCENTER`, `INCENTER`, `HYPOT`, `LEG`, `CIRCLE`,
   `REFLECT`, `ROTATE`, `DILATE`, all exact, no code copied. In 2nd MATH the SymCE tabs are now
   `Alg`, `Calc`, `Geo`: LEFT three times, twice, once from TEST.
+- **Powers up to 15.** `X^8` and past used to overflow the engine and answer
+  wrong; now `X^10+X^10` gives `2X^10`, and a power of 16 or more is left to
+  the OS (or `SYMCE LIMIT` in a command).
+- **X^X and 2^X on the home screen** stay symbolic: `X^X*X^X` gives
+  `(X^X)²`, `2^X*3` gives `3*2^X`, `X^X/X^X` gives 1. The OS used to work
+  them out as numbers. Commands on them (`DERIV(X^X,X)`) are `SYMCE LIMIT`.
+- **The cursor stays the insert cursor** after CLEAR, DEL and the arrow keys
+  (2nd LEFT/RIGHT too). The calculator switched those back to the block
+  (overwrite) cursor, although the next key still inserted. After ENTER it is
+  the block until you type, as before. 2nd INS still switches to overwrite,
+  until the next key.
 
 ## Known limits
 
@@ -530,7 +543,7 @@ The home-screen cursor is an **insert** cursor on the entry line.
   usual.
 - Limits: entry up to 64 tokens, answer up to 26 characters wide (in
   MathPrint a raised power or stacked fraction counts narrower), up to 6 different
-  variables, each power under 8, on the way too (`X^4*X^4/X` is out), numbers
+  variables, each power under 16, on the way too (`X^8*X^8/X` is out), numbers
   up to 999999. A fraction whose top and bottom both hold two or more
   variables, and neither is of the first power in some variable (`X+Y` is,
   `X²+Y²` is not), is refused unless one divides the other or one of them is
@@ -578,14 +591,17 @@ make -C symce check
                                                      sums, series, each also in DEGREE;
                                                      56 Geometry examples and errors, 500 random
                                                      MIDPOINT/CENTROID/AREA/INTERSECT/ROTATE/DILATE
-                                                     against exact fractions)
+                                                     against exact fractions; powers to 15 and X^X)
   hook_sim_test.py                     all hook cases pass, against the assembled bytes
+                                                    (the cursor keys through a cxMain stub included)
 make -C symce emu   (your ROM, CEmu)
   crash.py                             ALL SURVIVE  (25 screens, the Geometry popup and tab too: Y=, WINDOW, MODE, GRAPH, ERR, STAT, APPS,
                                                      TABLE, TBLSET, FORMAT, ZOOM, TRACE, CATALOG, MEM, LIST,
                                                      DRAW, VARS, MATH, the list editor, the program editor,
                                                      power off/on, ON, GarbageCollect, Horiz split screen)
-  e2e.py                               ALL PASS     (33 answers, FACTOR/SOLVE/DERIV/EXPAND from the menu,
+  e2e.py                               ALL PASS     (36 answers, X^12Y and X^X*X^X among them,
+                                                     the insert cursor after CLEAR, DEL, LEFT and 2nd LEFT
+                                                     in both modes, FACTOR/SOLVE/DERIV/EXPAND from the menu,
                                                      ERROR: NO SOLUTION and ERROR: SYNTAX then 1:Quit, the menu in both modes, MODE ANSWERS: DEC, fractions, decimals, echo, 2nd ENTER recall, re-run, Ans, /X at X=0,
                                                      MathPrint: stacked answer pasted back from history and edited,
                                                      a decimal next to a fraction likewise,
@@ -599,10 +615,10 @@ make -C symce emu   (your ROM, CEmu)
                                                      the Geo tab, B 3 circle through 3 points, and the
                                                      Circle submenu closed leaving every pixel as it was)
   lifecycle.py                         ALL PASS     (install, toggle, RAM clear, re-arm, another app deleted, re-install)
-  engine_device.py                     ALL MATCH    (2131 vectors, 55,455 bytes in 2 programs, Calculus,
+  engine_device.py                     ALL MATCH    (2131 vectors, 55,490 bytes in 2 programs, Calculus,
                                                      Geometry and DEGREE included: the calculator's
                                                      engine gives the host's bytes)
-  bigapp.py                            ALL PASS     (the 137,120-byte app, 3 appvars: fresh, over an old
+  bigapp.py                            ALL PASS     (the 138,023-byte app, 3 appvars: fresh, over an old
                                                      SymCE, RAM clear + reinstall, a GC to make room, 2X+2X -> 4X
                                                      each time; a missing and a foreign appvar refused, and no room
                                                      keeps the old SymCE, all with flash untouched)

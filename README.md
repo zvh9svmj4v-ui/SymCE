@@ -25,10 +25,11 @@ Full command list, install steps and known limits: [docs/USAGE.md](docs/USAGE.md
 
 ## Install
 
-1. Build the files (below).
+1. Download `SYMCE.8xp` and the `SYMCE#.8xv` files from the latest
+   [release](../../releases/latest), or build them (below).
 2. Send `SYMCE.8xp` and every `SYMCE#.8xv` to the calculator.
 3. Run `prgmSYMCE` through an ASM launcher (OS 5.8.4 blocks `Asm(`; AsmHook
-   works). It installs the SymCE flash app, about 137 KB, and needs about
+   works). It installs the SymCE flash app, about 138 KB, and needs about
    twice that in free archive while installing.
 4. **APPS → SymCE** toggles it on and off.
 

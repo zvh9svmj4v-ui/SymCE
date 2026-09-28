@@ -283,7 +283,7 @@ for name, tok in [("prgmA", "5f41"), ("prgmZZZ", "5f5a5a5a"),
                   ("matrix [A]", "5c00"), ("list L1", "5d00"),
                   ("recalled \"4X\"", "2a34582a"), ("2+2 numeric", "327032"),
                   ("(X²+X-Y²+Y)/(X²+2XY+Y²+X+Y)", "10580d7058 71590d7059118310580d70325859 70590d70587059 11".replace(" ", "")), ("X/0", "588330"), ("sqrt(sqrt(2)-X)", "bcbc32117158 11".replace(" ", "")),
-                  ("X^8 power", "58f038"), ("1000000X", "3130303030303058"),
+                  ("X^16 power", "58f03136"), ("1000000X", "3130303030303058"),
                   ("trailing +", "3258 70"), ("leading *", "8258"),
                   ("empty entry", ""), ("lone EF prefix", "58ef"),
                   ("edit-buffer box tokens", "58ef2a0400ef2d7032587031"),
@@ -379,6 +379,50 @@ ins("A=3 ctx switch",     False, a=3)
 # or a hook armed mid-entry) we cannot tell. Both leave the OS's mode alone.
 ins("cursor inside a box",    False, base_delta=0x45)
 ins("no baseline captured",   False, base_ok=False)
+
+
+def ins_key(name, key, runs, insert=True, **kw):
+    """CLEAR, DEL and the cursor keys end insert mode in the OS, after the hook
+    set it, and the cursor showed as a block. On the entry the hook runs them
+    through (cxMain) itself -- once, its own A=1 call back passing the key on --
+    sets insert again and swallows the key, giving every register back.
+    Anywhere else, and for any other key, it leaves cxMain alone."""
+    try:
+        s = Sim(BODY)
+        s.w8(ez80sim.CX_CUR_APP, 0x40)
+        top = kw.pop("top", 0xD1A8CA)
+        s.w24(ez80sim.EDIT_TOP, top)
+        s.w24(ez80sim.BASE_TOP, 0xD1A8CA)
+        s.w8(ez80sim.BASE_OK, 0xA5)
+        s.w8(ez80sim.CMD_FLAGS, kw.pop("cmd", 0x04))
+        s.w8(ez80sim.TEXT_FLAGS, 0x02)
+        s.w24(ez80sim.HOOK_PTR, s.org)
+        s.a, s.pc = 1, s.org + 1
+        s.hl, s.de, s.ix, s.iy, sp = 0x123456, 0x654321, 0xABCDEF, ez80sim.IY_OS, s.sp
+        s.bcset(0x0A0009 | key << 8)
+        s.run()
+    except Trap as ex:
+        fail(name, ex); return
+    got = (s.cx_keys, s.cx_inner, not s.fz, bool(s.r8(ez80sim.TEXT_FLAGS) & 0x10))
+    want = ([key], [True], True, insert) if runs else ([], [], False, insert)
+    if got != want:
+        fail(name, "cxMain keys %s, its hook call Z=%s, swallowed %s, insert %s" % (
+            got[0], got[1], got[2], got[3]))
+    elif (s.hl, s.de, s.ix, s.iy, s.bc(), s.sp) != (0x123456, 0x654321, 0xABCDEF, ez80sim.IY_OS,
+                                                    0x0A0009 | key << 8, sp):
+        fail(name, "registers or stack not given back")
+    elif s.r8(ez80sim.IN_KEY):
+        fail(name, "left its guard set")
+    else:
+        print("ok   %-24s %s" % (name, "run through cxMain, insert on" if runs else "passed on"))
+
+
+for k, n in [(0x09, "CLEAR"), (0x0A, "DEL"), (0x01, "RIGHT"), (0x02, "LEFT"), (0x03, "UP"),
+             (0x0E, "2nd LEFT"), (0x0F, "2nd RIGHT")]:
+    ins_key(n + " keeps insert", k, True)
+for k, n in [(0x04, "DOWN"), (0x05, "ENTER"), (0x0B, "INS"), (0x9A, "a letter")]:
+    ins_key(n + " not wrapped", k, False)
+ins_key("CLEAR in a box", 0x09, False, insert=False, top=0xD1A90F)
 
 
 def key_writes():

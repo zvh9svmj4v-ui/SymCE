@@ -76,6 +76,9 @@ CASES = [
     ("X^2",   "xton ^ 2",        b"X" + SQ, "exponent; used to crash"),
     ("X^3",   "xton ^ 3",        b"X" + CB, "the other raised glyph"),
     ("X^4",   "xton ^ 4",        b"X^4",    "past 3: falls back to a flat caret"),
+    ("X^8+X^8", "xton ^ 8 + xton ^ 8", b"2X^8", "past 7: a power has 4 bits, up to 15"),
+    ("X^12Y", "xton ^ 1 2 alpha 1", b"X^12Y", "a two-digit power"),
+    ("X^X*X^X", "xton ^ xton * xton ^ xton", b"(X^X)" + SQ, "a variable exponent stays symbolic"),
     ("3X-X",  "3 xton - xton",   b"2X",     "coefficients subtract"),
     ("2X-5X", "2 xton - 5 xton", NEG + b"3X", "negative: the OS's own minus glyph"),
     ("(X+1)^2", "( xton + 1 ) ^ 2", b"X" + SQ + b"+2X+1", "expands"),
@@ -297,6 +300,20 @@ def main():
     ok &= good
     print("%-6s insert -> %-6s %s" % ("XX<2", show(got[0]) if got else "<missing>",
           "ok  typing inserts, it does not overwrite" if good else "FAIL %r" % got))
+    # ... and the cursor says so. CLEAR, DEL and the arrows end insert mode in
+    # the OS, which then drew the block (overwrite) cursor until the next key;
+    # the hook runs them through cxMain and sets it back (textFlags bit 4).
+    for mode, pro in (("cl", PROLOGUE), ("mp", PROLOGUE.replace("C ", "", 1))):
+        for keys in ("xton xton left", "2 xton clear", "clear", "xton xton 2nd left", "xton xton left del"):
+            for settle in (1500, 1900, 2300):
+                r = screen.read([("tf", 0xD00085, 1)], keys=pro + keys + " .",
+                                files=FILES, launch=LAUNCH, lead=False, settle=settle)
+                if r["tf"] != b"\xff":
+                    break
+            good = bool(r["tf"][0] & 0x10)
+            ok &= good
+            print("%-6s cursor -> %-6s %s" % (mode, "insert" if good else "block",
+                  "ok  after %s" % keys if good else "FAIL after %s: textFlags %s" % (keys, r["tf"].hex())))
 
     # A program's output is the program's: Disp 2X+2X, then 2X+3X as the last
     # line, must both stay the OS's 0 although the ENTER that ran it was marked.

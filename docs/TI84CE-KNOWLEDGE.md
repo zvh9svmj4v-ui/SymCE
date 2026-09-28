@@ -256,6 +256,7 @@ State, fixed RAM inside `saveSScreen` (zeroed when armed):
 | `0xD0EE00` | `baseTop` | `editTop` captured while `cmdVirgin` is set (insert mode) |
 | `0xD0EE03` | `baseOk` | `0xA5` once `baseTop` belongs to this entry |
 | `0xD0EE04` | `pending` | `0xFF`: ENTER, for A=2 to try. `0xFE`: A=2 answered, A=0 shows it |
+| `0xD0EE05` | `inKey` | Nonzero while A=1 runs a cursor key through `(cxMain)` itself: the OS's own A=1 call back passes the key on, and clears it |
 | `0xD0EE20` | `lastAns` | What `Ans` stands for: length + SymCE's tokens (64 at most), or `0xFF` + a copy of `OP1` (the OS's own result); `0` = nothing |
 | `0xD0EE80` | `ansBuf` | The engine's answer as tokens, 64 at most; at A=0 the text `0x91FC2` draws. At A=2 it also holds OP1 for a moment |
 | `0xD0EEC0` | `ansBuf+64` | The Classic columns the engine counted for its answer (capped at 255), for A=0's `BC`. A=0 reads it **before** copying `lastAns` into `ansBuf`: a 64-token answer's NUL lands on it |
@@ -267,8 +268,14 @@ engine; its image starts `jp menu_key`, `jp menu_tab`). The body reaches each wi
 `jp (hl)`, after the same `83 FE 01` check.
 
 1. **A=1, any key:** `pending = 0`. On the home screen, set `textInsMode` if
-   `editTop == baseTop` (cursor on the entry, not in a box or menu). If the key
-   is ENTER and none of `apdWarmStart`, `parseInput`, `appRunning` is set and
+   `editTop == baseTop` (cursor on the entry, not in a box or menu). There,
+   RIGHT LEFT UP CLEAR DEL 2nd-LEFT 2nd-RIGHT (`01 02 03 09 0A 0E 0F`) go
+   through `(cxMain)` from the hook (`inKey` set, so the nested A=1 passes
+   them on), `textInsMode` is set again if the cursor is still on the entry
+   (not a box it moved into, not a history line UP selected; `baseTop` retaken
+   if the line is virgin), and the key is swallowed (NZ): the OS ends insert
+   mode on those keys, after the hook, and drew the block cursor until the
+   next key (fixed 2026-09-28). If the key is ENTER and none of `apdWarmStart`, `parseInput`, `appRunning` is set and
    `editOpen` is: `pending = 0xFF`. Return Z. The entry is never touched, so the
    echo and `2nd ENTRY` show exactly what was typed.
 2. **A=2, `cxCurApp = 0x40`, `pending = 0xFF`:** check `(homescreenHookPtr)`
@@ -366,6 +373,17 @@ The baseline moves with history, so never hardcode it. Record `editTop` while
 Only test that gets `MATH 4, CLEAR, 2+2` (flat-looking `2+2` inside a radical)
 right. SymCE uses it only for insert mode now; the answer comes from prog `#`.
 
+**Insert mode ends on cursor keys (*measured* 2026-09-28, 5.8.4).** `textFlags`
+bit 4 is cleared by the OS's handling of RIGHT, LEFT, UP, CLEAR, DEL,
+2nd-LEFT/RIGHT (`0x0E`/`0x0F`) and ENTER, Classic and MathPrint alike (DEL:
+`res 4,(iy+5)` at `0x58A8A`; CLEAR and ENTER through the new-line routine,
+`set 5,(iy+12)` / `res 4,(iy+5)` at `0x58D0D`/`0x58D11`). DOWN and typing
+leave it; 2nd INS (`0x0B`) toggles it. The cursor draw (`0x5C80A`) picks
+underline or block from that bit on every blink; the MathPrint branch skips
+the cursor hook, so the flag is the only lever. SymCE sets it back after those
+keys (§4, A=1). After ENTER it stays clear until the next key: ENTER is not
+run through `cxMain`, since A=2 and A=0 nest inside it.
+
 **Prog `#` (and `begPC`) solve the tree (*measured*).** In MathPrint an
 exponent or n/d box makes the edit buffer a tree: `X^7Y` typed with a box is
 `58 EF2A 0E00 EF2D 59`, the 7 in a separate node. By A=2 the OS has flattened
@@ -447,7 +465,7 @@ most (`preal()` in `engine.c`).
 | `0x062210` | ERR screen builder | Title `ERROR: ` + message; each further NUL-terminated string after the message's NUL is a description line under the menu, until an empty string. So a custom message needs **two** NULs, or the bytes after it print. Bit 7 of `errNo` (`E_EDIT`) adds `2:Goto` |
 | `0x02014C` | `_GetCSC` | A = scan code, 0 if none. Raw: ALPHA is `0x30`, 2nd `0x36`, no key-code translation. SymCE's menu loops on it (no APD in that loop) |
 | `0x020834` | `_VPutS` (`0xA28C7`) | HL = text at `penCol` (`0xD008D2`, 3 bytes) / `penRow` (`0xD008D5`). Calls VPutMap `0xA2594` per character, which draws with **`drawFG` `0xD026AC` / `drawBG` `0xD026AA`** (CEdev `os_DrawFGColor`/`os_DrawBGColor`), even in the large font; `textFG`/`textBG` (`0xD02688`/`0xD0268A`) do nothing here. `fontFlags` (`iy+0x32`, `0xD000B2`) bit 2 = large font, 16-row cells. "SymCE" in the large font is 60 px wide (*measured*) |
-| `(0xD007CA)` | `cxMain` (home: `0x58680`) | A = key code: handles it exactly as a key press, MathPrint included, and calls the homescreen hook with A=1 first. From inside the hook at A=1 this types keys: FACTOR( via `9A`+letter and `85` gives the same edit buffer as ALPHA-typing it (*measured*) |
+| `(0xD007CA)` | `cxMain` (home: `0x58680`) | A = key code: handles it exactly as a key press, MathPrint included, and calls the homescreen hook with A=1 first. From inside the hook at A=1 this types keys: FACTOR( via `9A`+letter and `85` gives the same edit buffer as ALPHA-typing it (*measured*). The hook can also run the key it was called with through it and return NZ: the outer call then does nothing more (*measured*, the insert-cursor fix) |
 | `0x020178` | `_PPutAway` (`0x8C73A`) | Calls `(cxPPutAway)`; home: `0x58BB0` saves the entry into `cmdShadow` (`0xD0232D`, 260 bytes) and, in MathPrint (`0x80168`, `bit 5,(iy+0x44)`), the cursor offset at `0xD02435` |
 | `0x02111C` | `_CxReDisp` (`0x8C7AB`) | Calls `(cxRedisp)`; home: `0x58353` copies `cmdShadow` back into `textShadow` and reopens the entry. Alone it redraws a stale `cmdShadow`: the answer line and the entry vanish (*measured*) |
 
@@ -884,10 +902,30 @@ scratch hook, MathPrint and Classic). At A=2, after `pop iy` (so
   whose caller is big too. A small callee inlined into a small caller
   (`unroot` into `mulinto`, `lsub` into `calc2`) is smaller inlined.
   Measure: `z80-none-elf-nm -S` on the linked elf, before and after.
+- **Powers are 4-bit nibbles, and the carry says when one overflows**
+  (2026-09-28). A monomial is six 4-bit exponents in one `unsigned` (24 bits
+  on the eZ80, 32 on the host). They used to stop at 7, with `0x888888`
+  marking an overflow into bit 3. Now `madd()` adds two monomials and spots a
+  carry out of any nibble: `(a ^ b ^ sum) & 0x111110` (a nibble's low bit
+  that is not the xor of the inputs' low bits got a carry from below), and
+  `(sum & 0xFFFFFF) < a` for the top one, which leaves 24 bits on the eZ80 and
+  shows as a sum below an input, and stays past bit 23 on the host, where the
+  mask drops it the same way. So powers go to 15 on both builds, and anything
+  sized by the exponent (`ip_t.a[16]`, `group()`'s counts, `nroots()`'s 16
+  roots) grew to 16.
+- **Past the IX reach, every local costs bytes** (*measured* 2026-09-28).
+  `ip_t` at 16 coefficients made `ipdiv()`'s frame (two of them plus a
+  remainder) and `ipfactor()`'s cross the ±127 bytes of `(ix+d)`, and the
+  engine grew 1.7 KB. Fixed without shrinking anything: `ipdiv()` keeps only
+  the 3 live remainder words (the divisor is degree 1 or 2) instead of a
+  whole `ip_t`, and `irred()` hands `ipfactor()` its polynomial plus two
+  scratch `ip_t`s from the rational pool (`tmp()`), off the stack. `ipfactor`
+  2,456 → 1,816 bytes; `ipdiv` 893.
 - **The engine's stack** (*measured* 2026-09-27, engine_device on 5.8.4):
   at most 1,451 bytes below the caller's frame over 2,100 vectors, the
   deepest being `INTEGRAL(1/(X²+1),X)`. The CE stack is 4 KB. The largest
-  frames: `symce_engine` 448, `irred` 218, `cfmin` 194.
+  frames: `symce_engine` 448, `irred` 218, `cfmin` 194. 2026-09-28, with
+  `ipfactor`'s scratch in the pool: at most 1,340 bytes, same vectors.
 
 ---
 
@@ -1212,6 +1250,17 @@ N = A + B√P becomes A² - B²P. Each root r of that is kept only if D(r) ≠ 0
 P(r) ≥ 0, and A(r), B(r) have opposite signs or one is 0 (`rok()`, `nsign()`
 proving each sign; unproved means SYMCE LIMIT). A²-B²P = 0 identically
 (√(X²)=X, true for X ≥ 0) is SYMCE LIMIT, and so are two roots in V.
+
+X^X as a kernel (2026-09-28). On the plain home entry only (`ps_t.home`), a
+power whose exponent holds a variable is a `K_POW` kernel `ka^kb`: X^X, 2^X,
+(X+1)^(2X). It multiplies like any kernel (X^X·X^X = (X^X)², X^X/X^X = 1),
+so a sum or product of them simplifies; 1^X is 1, 0^X and X^X^X are left to
+the OS. `putk()` prints it with `putpar()`: parentheses only around a
+base/exponent that is not one number or one letter, and `(X^X)²` when the
+kernel itself is raised. Every command refuses it (SYMCE LIMIT): only the
+polynomial code and the printer know the kind. MathPrint draws a flat
+`X^10Y` or `X^XY^Y` answer with just the digits or the one letter in the
+exponent box (*measured*, VRAM), and pasting it back re-runs to itself.
 
 ---
 

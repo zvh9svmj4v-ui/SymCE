@@ -87,6 +87,8 @@ __asm__(
 "	.equ	baseTop,    0x0D0EE00\n"      /* editTop captured while the entry line was empty */
 "	.equ	baseOk,     0x0D0EE03\n"      /* 0xA5 once baseTop belongs to THIS entry */
 "	.equ	pending,    0x0D0EE04\n"      /* 0xFF: ENTER, for A=2 to try; 0xFE: A=2 answered, A=0 shows it */
+"	.equ	inKey,      0x0D0EE05\n"      /* nonzero: the hook itself is running this key through cxMain */
+"	.equ	cxMain,     0x0D007CA\n"      /* the home screen's key handler, A = key; calls this hook at A=1 first */
 "	.equ	ansBuf,     0x0D0EE80\n"      /* the answer, as tokens (MAXOUT = 64 at most); then the text 0x91FC2 draws */
 "	.equ	engineWork, 0x0D0EF00\n"      /* the engine's scratch, SYMCE_WORK bytes */
 "	.equ	lastAns,    0x0D0EE20\n"      /* what Ans is: length and tokens, or 0xFF and the OS's real */
@@ -114,7 +116,7 @@ __asm__(
 "\tld\t(pending), a\n"
 "\tld\ta, (cxCurApp)\n"
 "\tcp\ta, 0x40\n"
-"\tjr\tnz, .Lpass\n"
+"\tjr\tnz, .Lpass1\n"
 /* Insert mode, on every home-screen key -- but only while editTop is where it
    was when this line was empty, i.e. the cursor is on the entry itself and not
    inside a MathPrint box or a menu. */
@@ -139,11 +141,38 @@ __asm__(
 "\tjr\tnz, .Lnoins\n"
 "\tld\thl, textFlags\n"
 "\tset\t4, (hl)\n"
-/* ALPHA+DOWN there, and not on a selected history line (cmdFlags bit 4, which
-   leaves editTop alone in Classic): the menu. */
 "\tld\ta, b\n"
 "\tcp\ta, 0x08\n"
-"\tjr\tnz, .Lnoins\n"
+"\tjr\tz, .Lad\n"
+/* RIGHT LEFT UP (1..3), CLEAR DEL (9, 0x0A), 2nd LEFT/RIGHT (0x0E, 0x0F): the
+   OS ends insert mode on these (DEL: res 4,(iy+5) at 0x58A8A; CLEAR through the
+   new-line routine, 0x58D11), so the cursor showed as a block until the next
+   key set it again. Run the key through (cxMain) here, then set it back and
+   swallow the key. cxMain calls this hook at A=1 first; inKey passes that one
+   on, and clears itself so a key that never came back cannot leave it set. */
+"\tdec\ta\n"
+"\tcp\ta, 3\n"
+"\tjr\tc, .Lwfar\n"
+"\tsub\ta, 8\n"
+"\tcp\ta, 2\n"
+"\tjr\tc, .Lwfar\n"
+"\tsub\ta, 5\n"
+"\tcp\ta, 2\n"
+"\tjr\tnc, .Lnoins\n"
+".Lwfar:\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, .Lwrap - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tjp\t(hl)\n"
+/* Room here, out of the fall-through: .Lpass and .Lnotkey within jr reach. */
+".Lpass1:\n"
+"\tcp\ta, a\n"
+"\tret\n"
+".Lnotkey0:\n"
+"\tjr\t.Lnotkey1\n"
+/* ALPHA+DOWN there, and not on a selected history line (cmdFlags bit 4, which
+   leaves editTop alone in Classic): the menu. */
+".Lad:\n"
 "\tld\ta, (cmdFlags)\n"
 "\tand\ta, 0x10\n"
 "\tjr\tz, .Lmenu\n"
@@ -175,7 +204,7 @@ __asm__(
 ".Lpass:\n"
 "\tcp\ta, a\n"
 "\tret\n"
-".Lnotkey0:\n"                   /* .Lnotkey, in jr range of the dispatch */
+".Lnotkey1:\n"                   /* .Lnotkey, in jr range of the dispatch */
 "\tjr\t.Lnotkey\n"
 /* 0x21, the Algebra tab's items, wherever the cursor is: the menu too. */
 ".Lnot5:\n"
@@ -493,5 +522,60 @@ __asm__(
 "\tld\t(pending), a\n"
 "\tld\ta, 0x2B\n"
 "\tjp\t0x020790\n"                /* _JError */
+/* The key run through (cxMain), from .Lnotnew's key test (see there). hl and
+   de are on the stack. */
+".Lwrap:\n"
+"\tld\thl, inKey\n"
+"\tld\ta, (hl)\n"
+"\tld\t(hl), 0\n"
+"\tor\ta, a\n"
+"\tjr\tnz, .Lwpass\n"
+"\tld\t(hl), 1\n"
+"\tpush\tix\n"
+"\tpush\tiy\n"
+"\tpush\tbc\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, .Lwback - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tpush\thl\n"
+"\tld\ta, b\n"
+"\tld\thl, (cxMain)\n"
+"\tjp\t(hl)\n"
+".Lwback:\n"
+"\tpop\tbc\n"
+"\tpop\tiy\n"
+"\tpop\tix\n"
+"\txor\ta, a\n"
+"\tld\t(inKey), a\n"
+/* Insert back on if the cursor is still on the entry: the same test as above,
+   the baseline taken again if the key left the line empty (CLEAR). Not in a
+   box the key moved into, not on a history line UP selected. */
+"\tld\ta, (cmdFlags)\n"
+"\tbit\t5, a\n"
+"\tjr\tz, .Lwold\n"
+"\tld\thl, (editTop)\n"
+"\tld\t(baseTop), hl\n"
+".Lwold:\n"
+"\tand\ta, 0x10\n"
+"\tjr\tnz, .Lwdone\n"
+"\tld\thl, (baseTop)\n"
+"\tex\tde, hl\n"
+"\tld\thl, (editTop)\n"
+"\tor\ta, a\n"
+"\tsbc\thl, de\n"
+"\tjr\tnz, .Lwdone\n"
+"\tld\thl, textFlags\n"
+"\tset\t4, (hl)\n"
+".Lwdone:\n"
+"\tpop\tde\n"
+"\tpop\thl\n"
+"\txor\ta, a\n"
+"\tinc\ta\n"
+"\tret\n"
+".Lwpass:\n"
+"\tpop\tde\n"
+"\tpop\thl\n"
+"\tcp\ta, a\n"
+"\tret\n"
 "_symce_hook_end:\n"
 );

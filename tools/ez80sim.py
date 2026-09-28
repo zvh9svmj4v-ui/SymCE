@@ -50,6 +50,9 @@ OP1        = 0xD005F8      # a variable's name for ChkFindSym; the OS's own resu
 DISP_RESULT = 0x091FC2     # OS: draw the text at HL as a result of type A, file it in history
 CHK_FIND_SYM = 0x02050C    # OS: find the variable OP1 names; DE = its data, carry if none
 JERROR     = 0x020790      # OS: throw error A; never returns
+CX_MAIN_PTR = 0xD007CA     # (cxMain): the home screen's key handler, A = key
+CX_MAIN    = 0x058680      # where it points on the home screen (OS 5.8.4)
+IN_KEY     = 0xD0EE05      # nonzero while the hook runs a key through cxMain
 APP_ERR1   = 0xD025A9      # error 0x2B's message, then its description line
 IY_OS      = 0xD00080      # what the OS keeps in iy: its flags block
 ENTRY_AT   = 0xD30000      # the tokens of prog #, which holds the entry by A=2
@@ -126,6 +129,10 @@ class Sim:
         self.menu_ret = 0xBADBAD  # what it returns in HL
         self.prog = None          # where prog #'s data is, if it exists
         self.thrown = None        # the error A the hook threw through _JError
+        self.cx_keys = []         # the key of every (cxMain) call
+        self.cx_inner = []        # what the hook said (fz) when cxMain called it back
+        self.nest = 0             # hook calls cxMain made, still to return
+        self.w24(CX_MAIN_PTR, CX_MAIN)
 
     def _engine(self):
         """symce_engine(in, len, out, work, ans, mode), with the C calling convention:
@@ -145,6 +152,25 @@ class Sim:
         self.hl = self.de = self.iy = 0xBADBAD
         self.bcset(0xBADBAD)
         self.fz = self.fc = True
+        self.pc = self.pop()
+
+    def _cxmain(self):
+        """(cxMain)(A = key), which the hook calls to run a key itself. The OS
+        calls the hook at A=1 first, the key in B, and that call must pass it
+        on (Z); then it handles the key. Every key the hook runs this way ends
+        insert mode, as the OS does. Registers come back trashed."""
+        if self.pc == CX_MAIN:
+            self.cx_keys.append(self.a)
+            self.push(CX_MAIN + 1)
+            self.nest += 1
+            self.b, self.a = self.a, 1
+            self.pc = self.org + 1
+            return
+        self.cx_inner.append(self.fz)
+        self.w8(TEXT_FLAGS, self.r8(TEXT_FLAGS) & ~0x10)
+        self.hl = self.de = self.ix = self.iy = 0xBADBAD
+        self.bcset(0xBADBAD)
+        self.a = 0x5A
         self.pc = self.pop()
 
     def _menu(self):
@@ -265,6 +291,9 @@ class Sim:
         if self.pc == self.menu_at:
             self._menu()
             return True
+        if self.pc in (CX_MAIN, CX_MAIN + 1):
+            self._cxmain()
+            return True
         op = self.imm8()
 
         # ---- 8-bit loads ----
@@ -374,7 +403,10 @@ class Sim:
             self.b = (self.b - 1) & 0xFF
             if self.b: self.pc += d
         elif op == 0xE9: self.pc = self.hl                         # jp (hl)
-        elif op == 0xC9: return False                              # ret
+        elif op == 0xC9:                                           # ret
+            if not self.nest: return False
+            self.nest -= 1            # the hook's call back from cxMain returning to it
+            self.pc = self.pop()
         elif op == 0xC3:                                           # jp nn
             # Only ever out of the body, to throw: the OS unwinds from there.
             t = self.imm24()
@@ -448,7 +480,7 @@ class Sim:
         elif op == 0xCB:
             o2 = self.imm8()
             # set b,(hl) is 11 bbb 110, res b,(hl) is 10 bbb 110, bit b,(hl) is
-            # 01 bbb 110. Only the (hl) forms are emitted. bit leaves Z set when
+            # 01 bbb 110; bit b,a is 01 bbb 111. bit leaves Z set when
             # the bit is CLEAR, which is what the mode gate branches on.
             if o2 & 0xC7 == 0xC6:
                 self.w8(self.hl, self.r8(self.hl) | (1 << ((o2 >> 3) & 7)))
@@ -456,6 +488,8 @@ class Sim:
                 self.w8(self.hl, self.r8(self.hl) & ~(1 << ((o2 >> 3) & 7)))
             elif o2 & 0xC7 == 0x46:
                 self.fz = not (self.r8(self.hl) & (1 << ((o2 >> 3) & 7)))
+            elif o2 & 0xC7 == 0x47:                                # bit b,a
+                self.fz = not (self.a & (1 << ((o2 >> 3) & 7)))
             elif o2 in (0x19, 0x39):                               # rr c / srl c
                 v = self.c >> 1 | (0x80 if o2 == 0x19 and self.fc else 0)
                 self.fc = bool(self.c & 1); self.c = v; self.fz = (v == 0)

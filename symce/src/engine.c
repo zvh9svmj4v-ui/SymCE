@@ -104,7 +104,7 @@
  *
  * When none of those settles it -- (X²+X-Y²+Y)/(X²+2XY+Y²+X+Y) -- the entry
  * is refused. So is anything else out of scope -- E notation, functions,
- * a zero divisor, fractional powers, a root of more than one term, a power over 7 anywhere on the way, a
+ * a zero divisor, fractional powers, a root of more than one term, a power over 15 anywhere on the way, a
  * numerator or denominator over 999999, an answer wider than the screen (see
  * width()), an entry with no variable at all: 0, and the OS evaluates the
  * entry as usual.
@@ -135,11 +135,10 @@
 #include <stdint.h>
 
 #define NV        6           /* distinct variables, 4 bits of power each */
-#define OVF       0x888888u   /* a power over 7 sets its nibble's top bit */
 #define MAXT      24          /* terms in one polynomial */
 #define NPOOL     24          /* values in `work`; a scratch polynomial takes one */
 #define MAXDEPTH  6           /* nested parentheses; each level holds 2 of NPOOL */
-#define MAXPOW    31          /* largest exponent operand; X^8 fails on OVF */
+#define MAXPOW    31          /* largest exponent operand; X^16 fails in madd() */
 #define LIM       999999L     /* any stored numerator or denominator */
 #define BIG       1000000000L /* intermediates: two still add inside int32 */
 #define MAXLEN    64          /* longer entries are left to the OS */
@@ -231,6 +230,7 @@ typedef struct {
     uint8_t  var[NV];         /* rank -> token */
     uint8_t  lim;             /* get() takes slots below it; kernels' arguments sit above */
     uint8_t  fn;              /* TOLN..TCOLLECT: functions are read */
+    uint8_t  home;            /* the plain entry: X^X is a K_POW kernel */
     uint8_t  deg;             /* MODE_DEG */
     uint8_t  inans;           /* reading SymCE's own Ans: a comma is glyph 0x2C */
     uint8_t  nk;              /* kernels, at ranks nv.. after the variables: */
@@ -300,7 +300,19 @@ static int radd(term_t *t, int32_t n, int32_t d)
     return rset(t, a + b, dd);
 }
 
-/* t = x*y. The caller sets t's monomial to x's plus y's first; a variable
+/* *m += a, two monomials; 0 when a power passes 15, a carry out of its
+   nibble. The top one leaves the 24 bits: past them on the host, gone on
+   the eZ80, where it shows as a sum below a.
+   ponytail: 15 is 4 bits a power; 5-bit fields in a uint32 when more matters */
+static int madd(unsigned *m, unsigned a)
+{
+    unsigned r = *m + a;
+    if ((*m ^ a ^ r) & 0x111110u || (r & 0xFFFFFFu) < a) return 0;
+    *m = r;
+    return 1;
+}
+
+/* t = x*y. The caller sets t's monomial to x's plus y's first (madd()); a variable
    under both roots comes out, √X√X = X, and adds its power here. √2√6 = 2√3.
    Two different variables under one root are refused: √X√Y is √(XY) only
    while both are positive, and emit() could not say which it meant. */
@@ -321,7 +333,7 @@ static int rmul(term_t *t, const term_t *x, const term_t *y)
         (v & (v - 1))) return 0;
     if (both & IMAG) n = -n;
     if (both & ~IMAG)
-        for (k = 0; k < NV; k++) if (both >> (RVAR + k) & 1) t->mono += 1u << 4 * k;
+        for (k = 0; k < NV; k++) if (both >> (RVAR + k) & 1 && !madd(&t->mono, 1u << 4 * k)) return 0;
     t->rad = v | (uint32_t)r;
     return rset(t, n, d);
 }
@@ -514,8 +526,8 @@ static int mulinto(ps_t *s, poly_t *acc, const poly_t *f)
     r->n = 0;
     for (x = acc->t; x < acc->t + acc->n; x++)
         for (y = f->t; y < f->t + f->n; y++) {
-            t.mono = x->mono + y->mono;
-            if (!rmul(&t, x, y) || t.mono & OVF || !addterm(r, &t)) return 0;
+            t.mono = x->mono;
+            if (!madd(&t.mono, y->mono) || !rmul(&t, x, y) || !addterm(r, &t)) return 0;
         }
     *acc = *r;
     s->top--;
@@ -543,8 +555,8 @@ static int rem(poly_t *acc, const poly_t *f, poly_t *q)
         c.mono = l->mono - d->mono;
         if (!rmul(&c, l, &inv) || (q && !addterm(q, &c))) return 0;
         for (y = f->t; y < f->t + f->n; y++) {
-            t.mono = c.mono + y->mono;
-            if (!rmul(&t, &c, y) || t.mono & OVF) return 0;
+            t.mono = c.mono;
+            if (!madd(&t.mono, y->mono) || !rmul(&t, &c, y)) return 0;
             t.num = -t.num;
             if (!addterm(acc, &t)) return 0;
         }
@@ -838,8 +850,10 @@ static void rconst(rat_t *r, int32_t v)
    kernels of their own; e is K_E, log( and logBASE( are K_LOG with a base.
    K_LABS is ln|u|, ln(abs(u)), the Calculus menu's: INTEGRAL(1/X,X) is
    ln(abs(X)). K_ROOT is rootk()'s U = P, which a term only has under its
-   root: √(X+1), abs(X) (kb S when P is S²). */
-enum { K_SIN = 1, K_COS, K_TAN, K_EXP, K_LOG, K_E, H_LOG, H_LOGB, K_LABS, K_ROOT };
+   root: √(X+1), abs(X) (kb S when P is S²). K_POW is a power with a
+   variable in its exponent, ka^kb: X^X, 2^X, on the home screen only
+   (ps_t.home), where nothing but the polynomial code and putk() sees it. */
+enum { K_SIN = 1, K_COS, K_TAN, K_EXP, K_LOG, K_E, H_LOG, H_LOGB, K_LABS, K_ROOT, K_POW };
 #define KN(s, k) (NV - 1 - (s)->nv - (k))       /* kernel k's nibble, after the variables' */
 
 /* Each head: its code, its length, its tokens, '(' included. putk() writes
@@ -881,6 +895,11 @@ static uint8_t ishead(ps_t *s)
 }
 
 static int fncall(ps_t *s, rat_t *out, uint8_t h);
+static rat_t *keep(ps_t *s, const rat_t *r);
+static int kvar(ps_t *s, rat_t *out, uint8_t f, rat_t *a, rat_t *b);
+static int haskern(const ps_t *s, const rat_t *r);
+static int isnum(const rat_t *r, int32_t v);
+static int sym(const poly_t *p);
 
 /* ---- parser: each level returns 0 on anything out of scope ---- */
 
@@ -1049,12 +1068,22 @@ static int power(ps_t *s, rat_t *out)
         int32_t v;
         for (s->i++; peek(s) == T_NEG; s->i++) neg ^= 1;
         if (!e || !postfix(s, e)) return 0;
-        /* a whole number -MAXPOW..MAXPOW, and nothing else */
+        if (neg) pneg(&e->n);
         p = &e->n;
+        /* on the home screen, an exponent with a variable in it: the kernel
+           base^e, a variable to the rest. 1^X is 1; 0^X, and a kernel in
+           either (X^X^X, X^√(X+1)), are left to the OS. */
+        if (s->home && (sym(p) || sym(&e->d))) {
+            rat_t *b;
+            if (!out->n.n || haskern(s, out) || haskern(s, e) || !(b = keep(s, e))) return 0;
+            s->top--;
+            if (!isnum(out, 1) && !kvar(s, out, K_POW, out, b)) return 0;
+            continue;
+        }
+        /* else a whole number -MAXPOW..MAXPOW, and nothing else */
         if (!isconst(&e->d) || p->n > 1 || (p->n && (p->t[0].mono || p->t[0].den != 1 || p->t[0].rad != 1)))
             return 0;
         v = p->n ? p->t[0].num : 0;
-        if (neg) v = -v;
         if (v < -MAXPOW || v > MAXPOW) return 0;
         s->top--;
         if (!powinto(s, out, v)) return 0;
@@ -1114,6 +1143,14 @@ static uint8_t number(uint8_t *out, uint8_t n, int32_t v)
     return n;
 }
 
+static uint8_t putpow(uint8_t *out, uint8_t n, int32_t e)
+{
+    if (e == 2) PUT(T_SQR);
+    else if (e == 3) PUT(T_CUBE);
+    else if (e > 3) { PUT(T_POW); n = number(out, n, e); }
+    return n;
+}
+
 /* a/den as a decimal, den dividing 10^6 and a/den in lowest terms: 0.25 */
 static uint8_t decimal(uint8_t *out, uint8_t n, int32_t a, int32_t den)
 {
@@ -1162,10 +1199,13 @@ static uint8_t emit(const ps_t *s, poly_t *p, uint8_t *out, uint8_t n)
             uint8_t e = t->mono >> 4 * (NV - 1 - j) & 15;
             if (!e) continue;
             if (j < s->nv) PUT(s->var[j]);
+            else if (e > 1 && s->kf[j - s->nv] == K_POW) {     /* (X^X)², not X^X² */
+                PUT(T_LPAR);
+                if (!(n = putk(s, j - s->nv, out, n))) return 0;
+                PUT(T_RPAR);
+            }
             else if (!(n = putk(s, j - s->nv, out, n))) return 0;
-            if (e == 2) PUT(T_SQR);
-            else if (e == 3) PUT(T_CUBE);
-            else if (e > 3) { PUT(T_POW); PUT(0x30 + e); }
+            if (!(n = putpow(out, n, e))) return 0;
         }
         r = t->rad & ~IMAG;
         for (kr = j = 0; j < s->nk; j++)        /* a kernel under the root: rootk()'s */
@@ -1310,8 +1350,9 @@ static const char cmds[] = "LEFT\0RIGHT\0SOLVE\0CSOLVE\0CZEROS\0CPOLYROOTS\0POLY
 
 typedef struct {
     int8_t  d;                /* degree */
-    int32_t a[8];             /* whole coefficients, a[0] first */
+    int32_t a[16];            /* whole coefficients, a[0] first */
 } ip_t;
+typedef char ip_fits[3 * sizeof(ip_t) <= sizeof(poly_t) ? 1 : -1];   /* irred()'s tmp() */
 
 typedef struct {
     poly_t  *f[MAXF];         /* each primitive, first term positive */
@@ -1351,22 +1392,26 @@ static int32_t nextdiv(int32_t n, int32_t *i)
     return 0;
 }
 
-/* q = a/b when that leaves whole coefficients: 1; 0 when not, -1 past LIM */
+/* q = a/b when that leaves whole coefficients: 1; 0 when not, -1 past LIM.
+   b of degree 1 or 2, so only r[i..i+2] of the remainder is ever live: w. */
 static int ipdiv(ip_t *q, const ip_t *a, const ip_t *b)
 {
-    int64_t r[8], c;
+    int64_t w[3], c;
     int8_t i, j;
-    for (i = 0; i <= a->d; i++) r[i] = a->a[i];
     q->d = a->d - b->d;
-    for (i = q->d; i >= 0; i--) {
-        c = r[i + b->d];
+    for (j = 0; j <= b->d; j++) w[j] = a->a[q->d + j];
+    for (i = q->d; ; i--) {
+        c = w[b->d];
         if (c % b->a[b->d]) return 0;
         c /= b->a[b->d];
         if (c > LIM || c < -LIM) return -1;
         q->a[i] = (int32_t)c;
-        for (j = 0; j <= b->d; j++) r[i + j] -= c * b->a[j];
+        for (j = b->d; j--; ) w[j] -= c * b->a[j];
+        if (!i) break;
+        for (j = b->d; j; j--) w[j] = w[j - 1];
+        w[0] = a->a[i - 1];
     }
-    for (i = 0; i < b->d; i++) if (r[i]) return 0;
+    for (j = 0; j < b->d; j++) if (w[j]) return 0;
     return 1;
 }
 
@@ -1457,10 +1502,11 @@ static int pushquad(fl_t *fl, const ip_t *b, uint8_t k, uint8_t u, uint8_t den)
    roots p/q first, p | a[0], q | a[d], each tried only when q-p divides a(1)
    and q+p divides a(-1); then quadratic factors, Kronecker's way: g(0),
    g(1), g(-1) divide a(0), a(1), a(-1) and fix g. What is left has no factor
-   of degree 1 or 2, so it is irreducible below degree 6. */
+   of degree 1 or 2, so it is irreducible below degree 6. a[1] and a[2] are
+   scratch: the quotient and the divisor tried. */
 NOINLINE static int ipfactor(fl_t *fl, ip_t *a, uint8_t k, uint8_t u, uint8_t den)
 {
-    ip_t q, b;
+    ip_t *q = a + 1, *b = a + 2;
     int32_t p, c, f1, fm, i0, i1, im, a0, v1, vm, al;
     int64_t z;
     int8_t j, sg;
@@ -1469,15 +1515,15 @@ again:
     if (a->d < 2) return !a->d || puship(fl, a, k, u, den);
     for (f1 = fm = 0, j = 0; j <= a->d; j++) { f1 += a->a[j]; fm += j & 1 ? -a->a[j] : a->a[j]; }
     a0 = a->a[0] < 0 ? -a->a[0] : a->a[0];
-    b.d = 1;
+    b->d = 1;
     for (i0 = 0; (p = nextdiv(a0, &i0)); )
         for (i1 = 0; (c = nextdiv(a->a[a->d], &i1)); )
             for (sg = -1; sg < 2; sg += 2) {
                 if (gcd(p, c) != 1 || (c - sg * p ? f1 % (c - sg * p) : f1) ||
                     (c + sg * p ? fm % (c + sg * p) : fm)) continue;
-                b.a[0] = -sg * p; b.a[1] = c;
-                if ((r = ipdiv(&q, a, &b)) < 0) return 0;
-                if (r) { if (!puship(fl, &b, k, u, den)) return 0; *a = q; goto again; }
+                b->a[0] = -sg * p; b->a[1] = c;
+                if ((r = ipdiv(q, a, b)) < 0) return 0;
+                if (r) { if (!puship(fl, b, k, u, den)) return 0; *a = *q; goto again; }
             }
     if (a->d == 2) return pushquad(fl, a, k, u, den);
     if (a->d == 3) return puship(fl, a, k, u, den);
@@ -1485,7 +1531,7 @@ again:
     if (f1 < 0) f1 = -f1;
     if (fm < 0) fm = -fm;
     if ((z = (int64_t)a0 * f1) > 10000000000LL || z * fm > 10000000000LL) return 0;
-    b.d = 2;
+    b->d = 2;
     for (i0 = 0; (p = nextdiv(a0, &i0)); )
         for (i1 = 0; (v1 = nextdiv(f1, &i1)); )
             for (im = 0; (vm = nextdiv(fm, &im)); )
@@ -1495,9 +1541,9 @@ again:
                     al = (g1 + gm) / 2 - p;
                     if (!al || a->a[a->d] % al) continue;
                     c = al < 0 ? -1 : 1;                /* first term positive */
-                    b.a[0] = c * p; b.a[1] = c * (g1 - gm) / 2; b.a[2] = c * al;
-                    if ((r = ipdiv(&q, a, &b)) < 0) return 0;
-                    if (r) { if (!pushquad(fl, &b, k, u, den)) return 0; *a = q; goto again; }
+                    b->a[0] = c * p; b->a[1] = c * (g1 - gm) / 2; b->a[2] = c * al;
+                    if ((r = ipdiv(q, a, b)) < 0) return 0;
+                    if (r) { if (!pushquad(fl, b, k, u, den)) return 0; *a = *q; goto again; }
                 }
     /* ponytail: two cubics (or a cubic and a quartic) would pass unseen here */
     return a->d < 6 && puship(fl, a, k, u, den);
@@ -1508,7 +1554,7 @@ static void toip(ip_t *a, const poly_t *p, uint8_t k)
 {
     const term_t *x;
     int8_t j;
-    for (j = 0; j < 8; j++) a->a[j] = 0;
+    for (j = 0; j < 16; j++) a->a[j] = 0;
     a->d = 0;
     for (x = p->t; x < p->t + p->n; x++) {
         j = x->mono >> k & 15;
@@ -1534,16 +1580,16 @@ static int group(ps_t *s, poly_t *p, poly_t *g, uint8_t k)
 {
     poly_t *h = tmp(s);
     const term_t *x;
-    uint8_t e, best = 0, bn = MAXT + 1, cnt[8];
+    uint8_t e, best = 0, bn = MAXT + 1, cnt[16];
     int ok = 2, r;
     if (!h) return 0;
-    for (e = 0; e < 8; e++) cnt[e] = 0;
+    for (e = 0; e < 16; e++) cnt[e] = 0;
     for (x = p->t; x < p->t + p->n; x++) cnt[x->mono >> k & 15]++;
-    for (e = 0; e < 8; e++) if (cnt[e] && cnt[e] < bn) { bn = cnt[e]; best = e; }
+    for (e = 0; e < 16; e++) if (cnt[e] && cnt[e] < bn) { bn = cnt[e]; best = e; }
     if (bn < 2 || bn == p->n) goto done;        /* a monomial coefficient; or no such variable */
     slice(g, p, k, best);
     divmono(g, content(g, g->t[0].mono));
-    for (e = 0; e < 8; e++)
+    for (e = 0; e < 16; e++)
         if (cnt[e] && e != best) {
             slice(h, p, k, e);
             if ((r = divinto(s, h, g)) != 1) { ok = r ? 2 : 0; goto done; }
@@ -1565,15 +1611,18 @@ static int irred(ps_t *s, fl_t *fl, poly_t *p, uint8_t den)
     unsigned v = 0, w = 0;
     const term_t *x;
     poly_t *g;
-    ip_t a;
+    ip_t *a;
     uint8_t k, u = 0xFF, nv = 0, top = s->top;
     int r = 0;
     if (hasrad(p)) return 0;
     for (x = p->t; x < p->t + p->n; x++) w |= x->mono;
     for (k = 4 * NV; k; ) if (w >> (k -= 4) & 15) { if (nv++) u = k; else v = k; }
     if (nv == 1 || (nv == 2 && homog(p) >= 0)) {
-        toip(&a, p, (uint8_t)v);
-        return ipfactor(fl, &a, (uint8_t)v, nv == 1 ? 0xFF : u, den);
+        if (!(a = (ip_t *)tmp(s))) return 0;    /* and ipfactor's scratch: off the stack */
+        toip(a, p, (uint8_t)v);
+        r = ipfactor(fl, a, (uint8_t)v, nv == 1 ? 0xFF : u, den);
+        s->top = top;
+        return r;
     }
     if (prime(p)) return push(fl, p, den);
     if (!(g = tmp(s))) return 0;
@@ -1655,14 +1704,6 @@ static int after(const fl_t *fl, uint8_t a, uint8_t b)
     sx = second(x); sy = second(y);
     if (sx->mono != sy->mono) return sx->mono > sy->mono;
     return tapprox(sx) > tapprox(sy);
-}
-
-static uint8_t putpow(uint8_t *out, uint8_t n, int32_t e)
-{
-    if (e == 2) PUT(T_SQR);
-    else if (e == 3) PUT(T_CUBE);
-    else if (e > 3) { PUT(T_POW); n = number(out, n, e); }
-    return n;
 }
 
 /* v > 0 as primes: 2²*3 */
@@ -1824,8 +1865,8 @@ NOINLINE static int vrem(poly_t *acc, const poly_t *f, poly_t *q, uint8_t j)
         c.mono = x->mono - d->mono;
         if (!rmul(&c, x, &inv) || (q && !addterm(q, &c))) return 0;
         for (y = f->t; y < f->t + f->n; y++) {
-            t.mono = c.mono + y->mono;
-            if (!rmul(&t, &c, y) || t.mono & OVF) return 0;
+            t.mono = c.mono;
+            if (!madd(&t.mono, y->mono) || !rmul(&t, &c, y)) return 0;
             t.num = -t.num;
             if (!addterm(acc, &t)) return 0;
         }
@@ -1837,6 +1878,7 @@ NOINLINE static int vrem(poly_t *acc, const poly_t *f, poly_t *q, uint8_t j)
    print the same digits; CEdev's double is 32 bits, its long double 6 KB. */
 typedef struct { int64_t m; int e; } fp_t;
 typedef struct { fp_t r, i; } cx_t;
+typedef char nroots_fits[16 * sizeof(cx_t) + 16 * sizeof(fp_t) <= sizeof(rat_t) ? 1 : -1];
 #define FTOP ((int64_t)1 << 62)
 
 /* Speed: CEdev's int64 helpers go a bit at a time -- a 32x32 multiply ~7900
@@ -2192,7 +2234,7 @@ NOINLINE static uint8_t nroots(ps_t *s, poly_t *p, uint8_t j, uint8_t *out)
     poly_t *g = tmp(s), *d = tmp(s);
     rat_t *w = get(s);
     cx_t *z = (cx_t *)w, t;
-    fp_t *c = (fp_t *)(z + 8);
+    fp_t *c = (fp_t *)(z + 16);
     const term_t *x;
     unsigned m0;
     uint8_t m, k, e, n;
@@ -2349,7 +2391,7 @@ static int addmono(poly_t *to, const poly_t *p, unsigned m, uint8_t neg)
     term_t t;
     for (x = p->t; x < p->t + p->n; x++) {
         t = *x;
-        if ((t.mono += m) & OVF) return 0;
+        if (!madd(&t.mono, m)) return 0;
         if (neg) t.num = -t.num;
         if (!addterm(to, &t)) return 0;
     }
@@ -2582,13 +2624,35 @@ NOINLINE static int apply(ps_t *s, rat_t *out, uint8_t h, rat_t *a, rat_t *b, ra
     return ok;
 }
 
+/* r as answer() writes it, in parentheses unless it is one variable or a
+   number with no sign: K_POW's base and exponent, X^X, 2^X, (X+1)^(2X).
+   A number right after an operand gets a * in its '(''s place instead, as
+   3·2^X would otherwise read 32^X. */
+static uint8_t putpar(const ps_t *s, rat_t *r, uint8_t *out, uint8_t n)
+{
+    uint8_t m = n, k, c = m ? out[m - 1] : T_ADD;
+    PUT(T_LPAR);
+    if (!(n = answer(s, r, out, n))) return 0;
+    for (k = m + 1; k < n && (is_digit(out[k]) || out[k] == T_DOT); k++) ;
+    if (k < n && (n != m + 2 || !is_var(out[m + 1]))) PUT(T_RPAR);
+    else if (k == n && (is_digit(c) || c == T_DOT || is_var(c) || c == T_RPAR || c == T_SQR || c == T_CUBE))
+        out[m] = T_MUL;
+    else for (n--; m < n; m++) out[m] = out[m + 1];
+    return n;
+}
+
 /* kernel k as it is typed: sin(u), cos(u) in letters, tan(u), e^(u), e,
-   ln(u), log(u) for base 10, else logBASE(u,b) */
+   ln(u), log(u) for base 10, else logBASE(u,b); K_POW's putpar() twice */
 static uint8_t putk(const ps_t *s, uint8_t k, uint8_t *out, uint8_t n)
 {
     const uint8_t *h = heads;
     rat_t *b = s->kb[k];
     uint8_t f = b ? (isnum(b, 10) ? H_LOG : H_LOGB) : s->kf[k], j;
+    if (s->kf[k] == K_POW) {
+        if (!(n = putpar(s, s->ka[k], out, n))) return 0;
+        PUT(T_POW);
+        return putpar(s, b, out, n);
+    }
     if (s->kf[k] == K_ROOT) {                   /* U = P; unroot() leaves none */
         PUT(T_LPAR);
         if (!(n = answer(s, s->ka[k], out, n))) return 0;
@@ -3150,7 +3214,7 @@ static int ipoly(poly_t *out, const poly_t *p, uint8_t j, uint8_t m)
     for (x = p->t; x < p->t + p->n; x++) {
         t = *x;
         k = 2 * ((int32_t)(x->mono >> 4 * j & 15) - m) + 2 + (x->rad >> (RVAR + j) & 1);
-        if (!k || (t.mono += 1u << 4 * j) & OVF || !cmul(&t, 2, k) || !addterm(out, &t))
+        if (!k || !madd(&t.mono, 1u << 4 * j) || !cmul(&t, 2, k) || !addterm(out, &t))
             return 0;
     }
     return 1;
@@ -3187,8 +3251,8 @@ static int vpow(rat_t *r, uint8_t j, int8_t e)
     poly_t *p = e < 0 ? &r->d : &r->n;
     term_t *x;
     if (e < 0) e = -e;
-    if (e > 7) return 0;
-    for (x = p->t; x < p->t + p->n; x++) if ((x->mono += (unsigned)e << 4 * j) & OVF) return 0;
+    if (e > 15) return 0;
+    for (x = p->t; x < p->t + p->n; x++) if (!madd(&x->mono, (unsigned)e << 4 * j)) return 0;
     return 1;
 }
 
@@ -3221,8 +3285,8 @@ static int tabular(ps_t *s, poly_t *out, poly_t *q, unsigned km, uint8_t f, uint
     for (i = 0; q->n; i++) {
         m = (uint8_t)((f == K_COS) - i - 1) & 3;        /* sin(u + mπ/2): ±sin, ±cos */
         for (x = q->t; x < q->t + q->n; x++) {
-            t.mono = x->mono + (f ? 1u << 4 * (m & 1 ? cn : kn) : km);
-            if (!rmul(&t, x, &c) || t.mono & OVF) return 0;
+            t.mono = x->mono;
+            if (!madd(&t.mono, f ? 1u << 4 * (m & 1 ? cn : kn) : km) || !rmul(&t, x, &c)) return 0;
             if (f && m & 2) t.num = -t.num;
             if (!addterm(out, &t)) return 0;
         }
@@ -3256,7 +3320,7 @@ NOINLINE static int tpoly(ps_t *s, rat_t *out, rat_t *r, uint8_t j, const rat_t 
         *x = *r;
         if ((v = evalat(s, x, j, a)) != 1) return v;
         if (x->n.n) {
-            if ((first && !canon(s, x)) || k < sh || k - sh > 7) return 0;
+            if ((first && !canon(s, x)) || k < sh || k - sh > 15) return 0;
             for (i = 0; i < x->n.n; i++) x->n.t[i].mono += (unsigned)(k - sh) << 4 * j;
             if (!scale(&x->n, &f) || !raddinto(s, out, x)) return 0;
             if (first) break;
@@ -3589,13 +3653,13 @@ big:
 
 /* SERIES(f,V,order[,a]): with W = V-a, f = N/D = W^-vd·N/D̃, D̃ = D/W^vd;
    N and D̃ as Taylor polynomials to W^(order+vd), then N/D̃ by ascending
-   division: 1/sin(X) is 1/X+X/6+7X³/360 to order 3. Powers stay below 8. */
+   division: 1/sin(X) is 1/X+X/6+7X³/360 to order 3. Powers stay below 16. */
 NOINLINE static uint8_t cser(ps_t *s, uint8_t *out, rat_t *p, uint8_t j, rat_t *a, uint8_t o)
 {
     rat_t *A = p + 1, *B = p + 2, *c = p + 3, *q = get(s), *t = get(s), *u;
     term_t *x;
     uint8_t vd, k, m;
-    if (!t || rooted(s, p, j) || tfirst(s, c, &p->d, j, a, 7, &vd) != 1 || (m = o + vd) > 7) return 0;
+    if (!t || rooted(s, p, j) || tfirst(s, c, &p->d, j, a, 7, &vd) != 1 || (m = o + vd) > 15) return 0;
     t->n = p->n; pconst(&t->d, 1);
     k = 0;
     if (tpoly(s, A, t, j, a, m, 0, &k) != 1) return 0;
@@ -4620,7 +4684,7 @@ NOINLINE static uint8_t command(ps_t *s, uint8_t cmd, const char *name, uint8_t 
         r->d = p->d;
         if (!mulinto(s, &r->d, &p->d)) return 0;
         for (k = 0; k < r->d.n; k++)
-            if ((r->d.t[k].mono += 1u << 4 * j) & OVF) return 0;
+            if (!madd(&r->d.t[k].mono, 1u << 4 * j)) return 0;
         return reduce(s, r) == 1 ? answer(s, r, out, 0) : 0;
     }
     /* a polynomial in V: V neither below the bar nor under a root */
@@ -4778,7 +4842,7 @@ static uint8_t engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
     s.dec = mode & MODE_DEC;
     s.mp = mode & MODE_MP;
     s.deg = mode & MODE_DEG;
-    s.lim = NPOOL; s.fn = 0; s.nk = 0; s.inans = 0; s.tb = 0;
+    s.lim = NPOOL; s.fn = 0; s.home = 0; s.nk = 0; s.inans = 0; s.tb = 0;
 
     /* Ranks go out in alphabetical order, so comparing two packed monomials
        is already the tie-break the output wants. A byte in the variable range
@@ -4823,6 +4887,7 @@ static uint8_t engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
     if (!own && !s.nv && (k == len || mode & MODE_DEC)) return 0;
 
     p = get(&s);
+    s.home = 1;
     if (expr(&s, p) && s.i == len && reduce(&s, p) == 1) {
         if (!own && !s.nv && !hasrad(&p->n)) return 0;
         n = answer(&s, p, out, 0);

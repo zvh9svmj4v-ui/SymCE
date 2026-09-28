@@ -45,7 +45,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ENGINE = os.path.join(ROOT, 'symce/bin/host/engine_cli')
 MINI = os.path.join(ROOT, 'symce/bin/host/minipoly_cli')
 
-LIM, MAXEXP, NV, WIDTH, MAXLEN, MAXOUT = 999999, 7, 6, 26, 64, 64
+LIM, MAXEXP, NV, WIDTH, MAXLEN, MAXOUT = 999999, 15, 6, 26, 64, 64
 ADD, SUB, MUL, DIV, POW, NEG, ANS = 0x70, 0x71, 0x82, 0x83, 0xF0, 0xB0, 0x72
 LP, RP, SQR, CUBE, INV, DOT, SQRT = 0x10, 0x11, 0x0D, 0x0F, 0x0C, 0x3A, 0xBC
 FRAC = [0xEF, 0x2E]         # the n/d bar as the OS flattens a MathPrint fraction
@@ -356,7 +356,7 @@ def spell_poly(rows, syms, dec=False, roots=None):
                 out.append(int(s.name[1:], 16))
                 if e == 2: out.append(SQR)
                 elif e == 3: out.append(CUBE)
-                elif e > 3: out += [POW, 0x30 + e]
+                elif e > 3: out += [POW] + list(str(e).encode())
         if rk != 1 or rv is not None:
             out.append(SQRT)
             if rk != 1:
@@ -522,10 +522,13 @@ def pratt(tokens):
                     take()
                     neg = not neg
                 e = post()
-                if e.free_symbols:
-                    raise Refuse('symbolic exponent')
                 if neg:
                     e = -e
+                if e.free_symbols and LAX[0] and left != 0:
+                    left = left ** e            # X^X: the engine's K_POW kernel
+                    continue
+                if e.free_symbols:
+                    raise Refuse('symbolic exponent')
                 if not e.is_integer:
                     raise Refuse('fractional exponent')
                 left = power(left, e)
@@ -605,7 +608,7 @@ def tree(rnd, depth):
             n = ('mul', n, d)
         return ('div', n, d)
     if k == 'pow':
-        e = ('num', rnd.choice([0, 1, 2, 2, 3, 4, 5, 8]))
+        e = ('num', rnd.choice([0, 1, 2, 2, 3, 4, 5, 8, 12, 16]))
         if rnd.random() < 0.1:
             e = ('neg', e)
         return ('pow', tree(rnd, depth - 1), e)
@@ -652,7 +655,7 @@ def render(node, rnd):
         return [NEG] + sub(node[1], 3)
     if k == 'pow':
         e = node[2]
-        ex = [NEG, 0x30 + e[1][1]] if e[0] == 'neg' else list(str(e[1]).encode())
+        ex = [NEG] + list(str(e[1][1]).encode()) if e[0] == 'neg' else list(str(e[1]).encode())
         return sub(node[1], 4) + [POW] + ex
     if k in ('sqr', 'cube', 'recip'):
         return sub(node[1], 5) + [{'sqr': SQR, 'cube': CUBE, 'recip': INV}[k]]
@@ -934,7 +937,7 @@ E_ = bytes([BB, 0x31])
 FIN = [('logBASE(', b'\xef\x34'), ('sin(', b'\xc2'), ('cos(', b'\xc4'), ('tan(', b'\xc6'),
        ('ln(', b'\xbe'), ('log(', b'\xc0'), ('e^(', b'\xbf'), ('e', E_), ('(', b'\x10'), (')', b'\x11'),
        (',', b'\x2b'), ('²', b'\x0d'), ('³', b'\x0f'), ('^', b'\xf0'), ('-', b'\x71'), ('~', b'\xb0'),
-       ('+', b'\x70'), ('/', b'\x83'), ('θ', b'\x5b'), ('√(', b'\xbc'), ('=', b'\x6a'),
+       ('+', b'\x70'), ('*', b'\x82'), ('/', b'\x83'), ('θ', b'\x5b'), ('√(', b'\xbc'), ('=', b'\x6a'),
        ('abs(', b'\xb2'), ('ᴇ', b'\x3b')]      # ᴇ: the E of 1ᴇ99, infinity (LIMIT)
 # an answer's tokens: (text, python for sympy)
 FOUT = [(LCOS, 'cos(', 'cos('), (b'\xef\x34', 'logBASE(', 'logb('), (E_, 'e', 'E'),
@@ -943,7 +946,7 @@ FOUT = [(LCOS, 'cos(', 'cos('), (b'\xef\x34', 'logBASE(', 'logb('), (E_, 'e', 'E
         (b'\xc0', 'log(', 'log10('), (b'\xbf', 'e^(', 'exp('), (b'\xbc', '√(', 'sqrt('),
         (b'\x10', '(', '('), (b'\x11', ')', ')'), (b'\x2c', ',', ','), (b'\x0d', '²', '**2'),
         (b'\x0f', '³', '**3'), (b'\xf0', '^', '**'), (b'\x71', '-', '-'), (b'\xb0', '-', '-'),
-        (b'\x70', '+', '+'), (b'\x83', '/', '/'), (b'\xd7', 'i', 'I'), (b'\x3a', '.', '.')]
+        (b'\x70', '+', '+'), (b'\x82', '*', '*'), (b'\x83', '/', '/'), (b'\xd7', 'i', 'I'), (b'\x3a', '.', '.')]
 
 
 def ti(s):
@@ -1611,6 +1614,23 @@ def calculus(rnd, n, eng, report):
             ('SOLVE(√(X²)=X,X)', '', 'SYMCE LIMIT'),           # every X >= 0
             ('SOLVE(√(X)+√(X+1)=3,X)', '', 'SYMCE LIMIT'),     # two roots
             ('DISTANCE((X,0),(1,0))', '', 'abs(X-1)'),
+            # a variable in an exponent: a kernel, on the home screen only
+            ('X^X', '', 'X^X'),
+            ('X^X+X^X', 'M', '2X^X'),
+            ('(X^X)(X^X)', '', '(X^X)²'),
+            ('X^X/X^X', '', '1'),
+            ('(X^X+1)²', '', '(X^X)²+2X^X+1'),
+            ('3*2^X', '', '3*2^X'),
+            ('X^4*2^X', '', 'X^4*2^X'),
+            ('(X+1)^(2X)', 'M', '(X+1)^(2X)'),
+            ('X^~X', '', 'X^(-X)'),
+            ('(~2)^X', '', '(-2)^X'),
+            ('X^Y/Y^X', '', 'X^Y/Y^X'),
+            ('1^X', '', '1'),
+            ('0^X', '', None),                        # 0 or undefined: the OS's
+            ('X^X^X', '', None),                      # a kernel in a kernel
+            ('X^0.5', '', None),
+            ('DERIV(X^X,X)', '', 'SYMCE LIMIT'),
             ('\x25X³,X,2)', '', None),                # nDeriv(
             ('\x24X,X,0,1)', '', None),               # fnInt(
             ('\x27X²,X,~1,1)', '', None),             # fMin(
