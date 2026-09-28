@@ -1,5 +1,7 @@
 # SymCE
 
+DISCLAIMER: This application was written using Claude code. I have little to no actual coding experience, and this was created as a side project for fun. I cannot guarantee this code works or does as described below. Use at your own risk.
+
 A computer algebra system for the **TI-84 Plus CE** (OS 5.8.4), living
 inside the home screen. Type `2X+2X` and press ENTER: the stock OS says `0`
 (it plugs in X), SymCE says `4X`.
