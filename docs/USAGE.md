@@ -12,7 +12,8 @@ Build: `make -C symce` gives `symce/bin/SYMCE.8xp` (the installer) and
 ## Install (once)
 
 1. **Send `symce/bin/SYMCE.8xp` and every `symce/bin/SYMCE#.8xv`** (as many
-   as the build made; they go to the archive), then run `prgmSYMCE` through
+   as the build made; **send them to the Archive**, at 160 KB the three
+   appvars no longer fit in RAM together), then run `prgmSYMCE` through
    AsmHook (OS 5.8.4 blocks `Asm(`; AsmHook is one way back in). No reset needed first; the installer replaces the old
    hook and deletes v15's leftover appvars (`SYMCEHK`, `SYMCEPV`).
 2. It should say **"SymCE app installed. SymCE is ON"**. It checks everything
@@ -24,26 +25,58 @@ Build: `make -C symce` gives `symce/bin/SYMCE.8xp` (the installer) and
    - *"No blank flash below the last app. ... Delete an app or archived
      files."* The installer already garbage collected the archive for you
      (that is the pause); there is still no room for the app. Free some
-     archive (2nd mem 2) and run it again. The app is 136 KB (the Geometry
-     menu added 14 KB) and its appvars take as much again until it is
-     written: about 272 KB of free archive to install.
+     archive (2nd mem 2) and run it again. The app is 160 KB and its
+     appvars take as much again until it is written: about 320 KB of free
+     archive to install.
    - *"SymCE was built for OS 5.8.4 and does not know this one. Nothing was
      written."* Check the OS version (`2nd mem 1`). SymCE calls two
      undocumented OS routines and refuses to arm on any OS it has not checked.
-3. **APPS -> SymCE** turns it off and on. After a RAM clear the hook is gone
-   (the app is not); open SymCE from APPS once to turn it back on.
+3. **APPS -> SymCE** opens a settings screen (opening it changes nothing;
+   any other key, such as `CLEAR`, leaves it). Press:
+   - `1` to turn CAS (the SymCE hook and its 2nd MATH menu) on or off. After a
+     RAM clear the hook is gone (the app is not); open SymCE from APPS and
+     press `1` to turn it back on.
+   - `2` to switch the cursor between INSERT (SymCE keeps the entry line in
+     insert mode) and TI (the OS's own cursor, untouched). Only while CAS is
+     on; ALPHA+DOWN opens the menu either way.
+   - `3` to switch the Evo-style font (a Roboto-derived replacement for the
+     calculator's text) between Evo and TI. It is independent of CAS.
+   - `4` opens the **Graph viewer**: Y1..Y0 (the ones selected in Y=, as the
+     OS would plot them) drawn full screen (320x220, info line below) in
+     float32, in their Y= line colours, over the current window and Radian or
+     Degree. Keys: `+` `-` zoom about the centre, arrows pan (hold one and it
+     keeps panning), `0` back to the window the OS has, `CLEAR` or `2nd` `MODE`
+     leaves. A draw takes 0.02-0.8 s (the OS graph: 1.5-7.5 s), and there is
+     no status bar or auto power down while it is open. It reads Y=, WINDOW, MODE and the
+     stored A-Z and theta; nothing is written back. Limits: an equation with
+     a token it cannot compute (anything past `+ - * / ^ ( )`, X, letters, pi,
+     e, the n/d bar, `x^2` `x^3` `x^-1`, sqrt( abs( ln( log( e^( 10^( and the
+     six trig and inverse-trig functions) is skipped and named on the info
+     line, e.g. `Y3: unsupported token 5E`; over 96 tokens or deeper than 6
+     parentheses is refused the same way. No grid, TRACE, CALC, parametric,
+     polar or sequence modes, stat plots, and the GRAPH key still opens the
+     OS graph. Archived Yn and archived variables are not read.
+   - `5` runs `prgmSYMCE` (the installer) from the app itself, so it works
+     with no AsmHook2, even right after a RAM clear (the program is archived as
+     sent, so it survives one). It needs free RAM about the size of the program
+     (a few KB) and says so if there is not enough, or if `prgmSYMCE` is
+     missing or is not the installer. Any key returns to the settings.
+   The screen is redrawn after every press, in the font just chosen.
 4. **Upgrading** = send the new files and run the new `prgmSYMCE`. It deletes
    the SymCE app that is there and writes the new one. A RAM clear does *not*
    remove the app (it lives in flash), which is why older installers said
    "already installed" and left you on the old build with SymCE off
-   (`2Z+2X` -> `0`). After a RAM clear, open AsmHook2 from APPS first, or
-   `prgmSYMCE` gives `ERROR: INVALID`.
+   (`2Z+2X` -> `0`). Once SymCE is installed, run the new `prgmSYMCE` from
+   **APPS -> SymCE -> 5**: no AsmHook2 needed, and it works after a RAM clear
+   too as long as `prgmSYMCE` is still archived (it is, as sent). The *first*
+   install still needs AsmHook2, and typing `prgmSYMCE` at the home screen after
+   a RAM clear gives `ERROR: INVALID` until AsmHook2 is opened from APPS.
 
 `prgmSYMCE` and the `SYMCE#` appvars can be deleted after installing, to free
 archive; the app is all that's needed. Keep them if you'll want to reinstall.
 Deleting other apps is fine too: the calculator shifts SymCE in flash and
-moves its hook along with it. (Without AsmHook, though, `prgmSYMCE` can't run,
-so keep it if you'll want to upgrade.)
+moves its hook along with it. (Keep `prgmSYMCE` if you'll want to upgrade: it
+runs from APPS -> SymCE -> 5.)
 
 ---
 
@@ -133,6 +166,23 @@ DERIV(X³)            -> 3X²
 DERIV(X²Y,Y)         -> X²
 DERIV(1/X)           -> -1/X²
 ```
+
+SOLVE and CSOLVE use the values you have stored, as the calculator's own
+solve( does: every letter but the one you solve for is replaced by what it
+holds, and nothing stored is changed. Letters with nothing stored (after
+`DelVar X`) stay letters:
+
+```
+5->X, then SOLVE(X+2Y=3,Y)     -> Y=-1           (X still holds 5)
+2.5->X, then SOLVE(X+2Y=3,Y)   -> Y=1/4
+5->X, then SOLVE(X²=4,X)       -> X=-2 or X=2    (the letter solved for is ignored)
+DelVar X, then SOLVE(X+2Y=3,Y) -> Y=(3-X)/2
+```
+
+A stored value must be a short decimal (5, -3, 2.5). Anything else, such as
+`1/3->X` (stored as 0.33333333333333) or a complex number, gives
+`ERROR: SYMCE LIMIT`; store a simpler value, or `DelVar` it, to solve. The
+other commands, and plain entries like `2X+2X`, never look at stored values.
 
 Roots and `abs(` of anything stay exact (`abs(` is 2nd CATALOG or MATH NUM 1):
 
@@ -614,7 +664,12 @@ make -C symce emu   (your ROM, CEmu)
                                                      Geometry: MIDPOINT from the popup, DISTANCE from
                                                      the Geo tab, B 3 circle through 3 points, and the
                                                      Circle submenu closed leaving every pixel as it was)
-  lifecycle.py                         ALL PASS     (install, toggle, RAM clear, re-arm, another app deleted, re-install)
+  lifecycle.py                         ALL PASS     (install, settings keys 1 2 3, the 4: Graph row and 5: Run prgmSYMCE with no AsmHook2, RAM clear, re-arm, another app deleted, re-install)
+  graph_check.py (in make check)      ALL PASS     (the grapher's float32 evaluator against Python math: 60 named
+                                                     cases, degree mode, unsupported/syntax/long/deep, 300 random trees)
+  graph.py                             ALL PASS     (4: Graph on the real ROM: sin(X) and X^2/5 within +-1 row of
+                                                     round((Ymax-f)/(Ymax-Ymin)*219) at 10 columns each; draws in
+                                                     0.4-2.6 s where the OS graph takes 1.5-7.5 s)
   engine_device.py                     ALL MATCH    (2131 vectors, 55,490 bytes in 2 programs, Calculus,
                                                      Geometry and DEGREE included: the calculator's
                                                      engine gives the host's bytes)

@@ -154,7 +154,7 @@ def same_value(o, v):
             a, b = complex(v.subs(pt).evalf(30)), complex(g.subs(pt).evalf(30))
         except (TypeError, ValueError, ZeroDivisionError):
             continue
-        if a == a and abs(a) < 1e12:
+        if a == a and b == b and abs(a) < 1e12:    # b nan: a pole of the answer, X=Y=0 in Y/X
             pts.append((a, b))
     real = [(a, b) for a, b in pts if abs(a.imag) < 1e-12]
     use = real if len(real) >= 3 else pts    # √(-Y²): the principal root, as sympy's
@@ -193,8 +193,13 @@ def root(a):
         raise Refuse('root under a root')
     n, d = sympy.fraction(a)
     syms = sorted(a.free_symbols, key=lambda s: s.name)
-    tn = sympy.Poly(n, *syms).terms() if syms else [((), n)]
-    td = sympy.Poly(d, *syms).terms() if syms else [((), d)]
+    try:
+        tn = sympy.Poly(n, *syms).terms() if syms else [((), n)]
+        td = sympy.Poly(d, *syms).terms() if syms else [((), d)]
+    except sympy.PolynomialError:               # 4^(X²): not a polynomial, so not a monomial
+        if LAX[0]:
+            return sympy.sqrt(a)
+        raise Kernel('radicand not a polynomial')
     c = tn[0][1] / td[0][1]
     e = [x + y for x, y in zip(tn[0][0], td[0][0])]
     if len(tn) != 1 or len(td) != 1 or c < 0 or sum(k % 2 for k in e) > 1 or any(k % 4 == 2 for k in e):
@@ -927,6 +932,80 @@ def commands(rnd, n, ask, eng, report):
             algebra(p, t, nv, mp, q)
 
     return got
+
+
+def solve_vars(rnd, n, ask, eng, report):
+    """SOLVE(A=B,V) and CSOLVE: every letter but V is the value stored in it,
+    as in the OS's own solve(); a letter with nothing stored stays a letter,
+    and V's own stored value is ignored. Fixed cases against sympy, then random
+    ones that must answer what the entry with each value typed in (its digits
+    in parentheses) answers, byte for byte. A stored value that is no short
+    decimal, or is complex, is an error screen, never an answer."""
+    X, Y, Z = 0x58, 0x59, 0x5A
+    F = Fraction
+    done = 0
+
+    def typed(entry, vals):
+        """the entry's tokens with each stored letter's value typed in"""
+        o = ti(entry)
+        for k, v in vals.items():
+            o = o.replace(bytes([k]), spell(v))
+        return o
+
+    def call(entry, vals, mp=0):
+        return ask(eng, ti(entry), b'', mp, 0, [(k, ti_real(v)) for k, v in vals.items()])
+
+    def roots(entry, vals):
+        """what sympy says: real roots of lhs-rhs in Y, or None when symbolic"""
+        lhs, rhs = ti(entry[6:-3]).split(bytes([EQ]))
+        e = pratt(lhs) - pratt(rhs)
+        e = e.subs({sym(k): sympy.Rational(v.numerator, v.denominator) for k, v in vals.items() if k != Y})
+        return sorted(sympy.real_roots(sympy.Poly(e, sym(Y)))) if not e.free_symbols - {sym(Y)} else None
+
+    fixed = [('SOLVE(X+2Y=3,Y)', {X: F(5)}), ('SOLVE(X+2Y=3,Y)', {X: F(-3)}),
+             ('SOLVE(X+2Y=3,Y)', {X: F(5, 2)}), ('SOLVE(X+2Y=3,Y)', {X: F(5), Y: F(7)}),
+             ('SOLVE(Y²+X*Y=6,Y)', {X: F(1)}), ('SOLVE(Y²+X=Z,Y)', {X: F(1), Z: F(10)}),
+             ('SOLVE(X+2Y=3,Y)', {Z: F(1)}), ('SOLVE(X+2Y=3,Y)', {}),
+             ('SOLVE(X+2Y=Z,Y)', {X: F(0), Z: F(0)})]
+    for entry, vals in fixed:
+        o = call(entry, vals)
+        want = roots(entry, vals)
+        if want is None:                      # X stays: the answer has it
+            if not (isinstance(o, bytes) and X in o):
+                report('SOLVEV', ti(entry), o if isinstance(o, bytes) else str(o).encode(), b'symbolic')
+            continue
+        try:
+            got = sorted(pratt(s[2:]) for s in o.split(bytes([OR]))) if isinstance(o, bytes) else None
+        except (Syntax, Refuse):
+            got = None
+        if got is None or len(got) != len(want) or any(sympy.simplify(g - w) != 0 for g, w in zip(got, want)):
+            report('SOLVEV', ti(entry), o if isinstance(o, bytes) else str(o).encode(), None)
+        else:
+            done += 1
+    # 1/3 is refused, not turned into a huge fraction; nor is a complex value
+    o = ask(eng, ti('SOLVE(X+2Y=3,Y)'), b'', 0, 0, [(X, bytes([0, 0x7F]) + bytes([0x33] * 7))])
+    if o != 'SYMCE LIMIT':
+        report('SOLVEV', ti('X=1/3'), o if isinstance(o, bytes) else str(o).encode(), b'SYMCE LIMIT')
+    o = ask(eng, ti('SOLVE(X+2Y=3,Y)'), b'', 0, 0, [(X, bytes([0x0C, 0x80, 0x50]) + bytes(6))])
+    if o != 'SYMCE LIMIT':
+        report('SOLVEV', ti('X complex'), o if isinstance(o, bytes) else str(o).encode(), b'SYMCE LIMIT')
+    for entry in ('CSOLVE(Y²+X=0,Y)', 'CSOLVE(Y²+2Y+X=0,Y)'):
+        for v in (F(4), F(-4), F(1, 2), F(5)):
+            a = call(entry, {X: v})
+            b = ask(eng, typed(entry, {X: v}), b'', 0, 0)
+            if a != b:
+                report('CSOLVEV', ti(entry), a if isinstance(a, bytes) else str(a).encode(), b)
+            done += isinstance(a, bytes)
+    # random: stored values against the same entry with them typed in
+    for _ in range(n):
+        vals = {k: F(rnd.randint(-9, 9), rnd.choice([1, 1, 2, 4, 10])) for k in rnd.sample([X, Z, 0x41], rnd.randint(0, 3))}
+        text = rnd.choice(['SOLVE(X+2Y=Z,Y)', 'SOLVE(A*Y²+X*Y=Z,Y)', 'SOLVE(Y²-X=A,Y)', 'SOLVE(X*Y+Z=A*Y,Y)',
+                           'SOLVE(Y/X=Z,Y)', 'SOLVE(Y²=X²-Z,Y)'])
+        a, b = call(text, vals), ask(eng, typed(text, vals), b'', 0, 0)
+        if a != b:
+            report('SOLVEV', ti(text), a if isinstance(a, bytes) else str(a).encode(), b)
+        done += isinstance(a, bytes)
+    return done
 
 
 # ---- 7. functions: Convert Expression (TOLN .. TOCOS) and Trigonometry ----
@@ -1795,7 +1874,8 @@ def calculus2(rnd, n, eng, report):
                     (lt, lo), (ht, hi) = rnd.sample(PTS, 2)
                     t += ',X,' + lt + ',' + ht
                     a, b = min(lo, hi), max(lo, hi)
-                    if any(a <= p <= b for p in poles):
+                    den = sympy.fraction(sympy.cancel(f))[1]     # a pole of one term that the sum cancels is none
+                    if any(a <= p <= b and den.subs(X, p) == 0 for p in poles):
                         want = 'DOMAIN'
                     elif not (dom and (a < dom[0] or a == dom[0] and dom[1])):
                         g = sympy.lambdify(X, f, 'mpmath')
@@ -2092,12 +2172,14 @@ def main():
     eng = subprocess.Popen([ENGINE], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     mini = subprocess.Popen([MINI], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
-    def ask(p, t, ans=b'', mp=0, dec=0):
+    def ask(p, t, ans=b'', mp=0, dec=0, vals=()):
         """ans: the tokens Ans stands for, or a TI real as 0xFF and 9 bytes.
-        mp: as in MathPrint; dec: as for MODE ANSWERS: DEC (the engine only)."""
+        mp: as in MathPrint; dec: as for MODE ANSWERS: DEC (the engine only).
+        vals: (letter token, 9 bytes) stored in that letter, for SOLVE."""
         if ans and ans[0] != 0xFF:
             ans = bytes([len(ans)]) + ans
-        p.stdin.write(('M' if mp else '') + ('D' if dec else '') + t.hex() + (',' + ans.hex() if ans else '') + '\n')
+        p.stdin.write(('M' if mp else '') + ('D' if dec else '') + t.hex() + (',' + ans.hex() if ans else '') +
+                      ''.join(';%02x%s' % (k, v.hex()) for k, v in vals) + '\n')
         p.stdin.flush()
         r = p.stdout.readline().strip()
         if r[:1] == 'E':                     # an error screen: its message, as text
@@ -2264,6 +2346,8 @@ def main():
             homs += 1
     print('\nhomogeneous two-variable fractions answered: %d' % homs)
 
+    sv = solve_vars(rnd, n // 16, ask, eng, report)
+    print('SOLVE with stored letters answered: %d' % sv)
     cmds = commands(rnd, n // 2, ask, eng, report)
     print('commands answered: %s' % ', '.join('%s %d' % kv for kv in sorted(cmds.items())))
     fns = functions(rnd, n // 8, eng, report)

@@ -29,11 +29,12 @@ Full command list, install steps and known limits: [docs/USAGE.md](docs/USAGE.md
 
 1. Download `SYMCE.8xp` and the `SYMCE#.8xv` files from the latest
    [release](../../releases/latest), or build them (below).
-2. Send `SYMCE.8xp` and every `SYMCE#.8xv` to the calculator.
+2. Send `SYMCE.8xp` and every `SYMCE#.8xv` to the calculator's **Archive**
+   (together they no longer fit in RAM).
 3. Run `prgmSYMCE` through an ASM launcher (OS 5.8.4 blocks `Asm(`; AsmHook
-   works). It installs the SymCE flash app, about 138 KB, and needs about
-   twice that in free archive while installing.
-4. **APPS → SymCE** toggles it on and off.
+   works). It installs the SymCE flash app, about 160 KB, and needs about
+   twice that in free archive while installing. Later upgrades: APPS → SymCE → 5.
+4. **APPS → SymCE** opens the settings: `1` CAS on/off, `2` insert or TI cursor, `3` Evo or TI font, `4` the graph viewer, `5` run `prgmSYMCE` (upgrade with no AsmHook2).
 
 ## Build
 
@@ -78,6 +79,9 @@ this repository.
   (MIT); the current engine is a from-scratch replacement.
 - Factoring and rewrite ideas from [KhiCAS](https://www-fourier.univ-grenoble-alpes.fr/~parisse/giac.html);
   no code copied.
+- The optional Evo-style font (`symce/font/`) is derived from
+  [Roboto](https://github.com/googlefonts/roboto) (SIL Open Font License 1.1,
+  `symce/font/OFL.txt`).
 - `symce/app/include/` holds files from the CE toolchain under their own
   licenses (see each header).
 

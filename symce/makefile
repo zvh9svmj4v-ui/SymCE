@@ -4,7 +4,8 @@
 #   make          bin/SYMCE.8xp, the installer, and bin/SYMCE1.8xv .., the app
 #                 it installs. Send them all, run prgmSYMCE once.
 #   make PAD=n    the same with the app padded to n bytes, in bin/pad<n>
-#   make check    engine fuzzed on the host; hook body under tools/ez80sim.py
+#   make check    engine fuzzed on the host; hook body under tools/ez80sim.py;
+#                 the grapher's compiler and evaluator against Python's math
 #   make emu      real-ROM tests in tools/emu, the shipped engine included,
 #                 and the installer with a PAD=$(BIG) app (needs
 #                 ~/CEdev/ti84pce.rom)
@@ -26,7 +27,7 @@ OUT = bin$(if $(PAD),/pad$(PAD))
 
 # One fasmg run writes the image (obj/SYMCE.img), the installer and the parts
 # (obj/SYMCE.8xp, obj/SYMCE.v1 ..); the parts are renamed SYMCE1.8xv ..
-$(OUT)/SYMCE.8xp: obj/hook/hook.bin obj/hook/mhook.bin obj/engine.inc obj/menu.inc app/main.asm app/installer.asm app/ports.asm $(wildcard app/include/*.inc)
+$(OUT)/SYMCE.8xp: obj/hook/hook.bin obj/hook/mhook.bin obj/hook/fhook.bin obj/hook/lhook.bin obj/font.inc obj/engine.inc obj/menu.inc obj/graph.inc app/main.asm app/installer.asm app/ports.asm $(wildcard app/include/*.inc)
 	@mkdir -p $(OUT)
 	rm -f obj/SYMCE.* $(OUT)/SYMCE*.8xv
 	cd app && $(FASMG) $(if $(PAD),-i 'PAD := $(PAD)') main.asm ../obj/SYMCE.img
@@ -35,14 +36,20 @@ $(OUT)/SYMCE.8xp: obj/hook/hook.bin obj/hook/mhook.bin obj/engine.inc obj/menu.i
 
 # The hook is all inline asm, so it goes straight to raw bytes: no C runtime,
 # no linker. -fno-addrsig: GNU as rejects clang's .addrsig directive.
-obj/hook/hook.bin obj/hook/mhook.bin: obj/hook/%.bin: src/%.c
+obj/hook/hook.bin obj/hook/mhook.bin obj/hook/fhook.bin obj/hook/lhook.bin: obj/hook/%.bin: src/%.c
 	@mkdir -p obj/hook
 	$(CLANG) $< -o $(@:.bin=.s)
 	$(BINUTILS)-as -march=ez80+full $(@:.bin=.s) -o $(@:.bin=.o)
 	$(BINUTILS)-objcopy -O binary --only-section=.text $(@:.bin=.o) $@
 
-# The engine (and the ALPHA+DOWN menu, src/menu.c, entry symce_menu) is
-# ordinary C plus CEdev's runtime helpers (__ldivs and friends), each linked
+# The Evo font tables the font and localize hooks answer from, generated from
+# the hand-edited glyph files.
+obj/font.inc: font/large.txt font/small.txt ../tools/mkfont.py
+	python3 ../tools/mkfont.py build
+
+# The engine (and the ALPHA+DOWN menu, src/menu.c, entry symce_menu, and the
+# grapher, src/graph.c, entry symce_graph, which also wants libc's sinf and
+# powf) is ordinary C plus CEdev's runtime helpers (__ldivs and friends), each linked
 # on its own at three bases: the first two differ exactly at its absolute
 # addresses, which relocs.py turns into app relocations; the third checks them.
 obj/%.inc: src/%.c src/engine.ld ../tools/relocs.py
@@ -51,7 +58,7 @@ obj/%.inc: src/%.c src/engine.ld ../tools/relocs.py
 	$(BINUTILS)-as -march=ez80+full obj/$*/$*.s -o obj/$*/$*.o
 	for b in $(BASES); do \
 	    $(BINUTILS)-ld -T src/engine.ld -e _symce_$* -Ttext=$$b --gc-sections --no-warn-execstack \
-	        obj/$*/$*.o $(CEDEV)/lib/crt/libcrt.a -o obj/$*/$$b.elf && \
+	        obj/$*/$*.o $(CEDEV)/lib/crt/libcrt.a $(CEDEV)/lib/libc/libc.a $(CEDEV)/lib/crt/libcrt.a -o obj/$*/$$b.elf && \
 	    $(BINUTILS)-objcopy -O binary obj/$*/$$b.elf obj/$*/$$b.bin || exit 1; \
 	done
 	python3 ../tools/relocs.py symce_$* $@ $(foreach b,$(BASES),$(b) obj/$*/$(b).bin)
@@ -66,6 +73,11 @@ bin/host/minipoly_cli: ../tools/minipoly_cli.c ../tools/minipoly.c
 	@mkdir -p $(@D)
 	cc -O2 -o $@ $^
 
+# The grapher's compiler and evaluator, for graph_check.py.
+bin/host/graph_cli: src/graph.c ../tools/graph_cli.c
+	@mkdir -p $(@D)
+	cc -O2 -o $@ ../tools/graph_cli.c -lm
+
 # Run the assembled hook body under tools/ez80sim.py. These test the SHIPPED
 # BYTES -- hook.bin, checked to sit verbatim in bin/SYMCE1.8xv -- not a C model
 # of them, and they need no ROM, so they run on every build.
@@ -74,9 +86,11 @@ bin/host/minipoly_cli: ../tools/minipoly_cli.c ../tools/minipoly.c
 #                     tools/minipoly.c (the engine it replaced), byte for byte
 #   hook_sim_test.py  gates, the pending mark, the engine call and what it must
 #                     restore, the display hand-off, insert mode, bad pointers
-check: bin/SYMCE.8xp bin/host/engine_cli bin/host/minipoly_cli
+check: bin/SYMCE.8xp bin/host/engine_cli bin/host/minipoly_cli bin/host/graph_cli
 	@python3 ../tools/engine_check.py 4000 | tail -6
 	@python3 ../tools/hook_sim_test.py | tail -1
+	@python3 ../tools/graph_check.py | tail -2
+	@python3 ../tools/mkfont.py check
 
 # bigapp.py's no-room case installs tools/emu/old/SYMCE1.8xv, an early build
 # kept as a fixture: under the 61 KB the ROM has free below its lowest app.

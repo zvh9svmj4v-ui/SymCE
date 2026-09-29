@@ -163,17 +163,15 @@ def main():
 
     # The archive as full as this ROM's, nothing in it deleted, the old SymCE
     # right below the lowest app: the new one fits neither beside it nor in
-    # its place, and garbage collecting frees no sector. The appvars go to
-    # RAM, as the archive has no room for them either. The old SymCE is a
-    # pinned build (old/, a fixture) under the 61 KB free here: the shipped one
-    # is past it, and erasing a sector for it lets the GC pack the archive
-    # into one sector fewer, room enough for the new app.
-    # ponytail: 3 appvars in RAM; past ~150 KB of app, pad less for this one.
+    # its place, and garbage collecting frees no sector. The three appvars
+    # (160 KB, too much for free RAM together) are sent archived, so the
+    # archive has three sectors erased for them and is full again after.
+    # The old SymCE is a pinned build (old/, a fixture) under the 61 KB free
+    # here: the shipped one is past it, and erasing a sector for it lets the GC
+    # pack the archive into one sector fewer, room enough for the new app.
     old, _ = image(OLD)
-    tight = rom("tight", old=old, undelete=[0x140001])
-    ram = [tifile(p, os.path.join(HERE, "_ram", os.path.basename(p)), flag=0)
-           for p in parts(PAD)[1:]]
-    rows, ptr, flag, r, dest = state(parts(PAD)[:1] + ram, INSTALL, tight, len(old))
+    tight = rom("tight", old=old, undelete=[0x140001], erase=range(0x1D, 0x20))
+    rows, ptr, flag, r, dest = state(parts(PAD), INSTALL, tight, len(old))
     kept = r["app"] == crc32c(installed(old, dest))
     check("no room keeps old SymCE", any("No blank flash" in l for l in rows) and kept
           and int.from_bytes(r["trailer"], "little") == len(old) - 3,
@@ -181,7 +179,8 @@ def main():
     # Sent archived into that archive, the shipped build's SYMCE1 fits and
     # SYMCE2 does not: the OS leaves SYMCE2 an empty appvar in RAM (seen on a
     # real calculator too), which the installer must not call another build.
-    rows, ptr, flag, r, dest = state(parts(HERE), INSTALL, tight, len(old))
+    full = rom("full", old=old, undelete=[0x140001])
+    rows, ptr, flag, r, dest = state(parts(HERE), INSTALL, full, len(old))
     kept = r["app"] == crc32c(installed(old, dest))
     check("empty appvar refused", any("is empty" in l for l in rows) and kept,
           "rows %s, old app %s" % (rows[:2], "kept" if kept else "CHANGED"))

@@ -81,9 +81,19 @@ installApp:
     ld (HOOK_ANS), a
     call ti.SetHomescreenHook
     pop hl
+    push hl
     ld de, mhook_rel
     add hl, de
     call ti.SetMenuHook
+    pop hl
+    push hl
+    ld de, fhook_rel
+    add hl, de
+    call ti.SetFontHook
+    pop hl
+    ld de, lhook_rel
+    add hl, de
+    call ti.SetLocalizeHook
     ; v15 and earlier kept the body in these appvars; nothing reads them now.
     ld hl, oldHookVar
     call delVar
@@ -466,7 +476,7 @@ installedStr:
     db "2X+2X ENTER shows 4X.", 0
     db " ", 0
     db "After a RAM clear, open", 0
-    db "SymCE from APPS.", 0
+    db "SymCE from APPS, press 1.", 0
     db 0
 
 missingStr:

@@ -61,6 +61,13 @@
  *     FACTOR(12) -> 2²*3               SOLVE(X²=2,X) -> X=-√(2) or X=√(2)
  *     SOLVE(X+2=4,X) -> X=2            SOLVE(X+2Y=3,Y) -> Y=(3-X)/2
  *
+ * In SOLVE and CSOLVE every letter but the one solved for stands for the
+ * value stored in it, as in the OS's own solve(): 5→X, then SOLVE(X+2Y=3,Y),
+ * is Y=-1. A letter with no value stored stays a letter, and the stored value
+ * of the solved-for letter is ignored. A value is exact when it is a decimal
+ * (preal(): 5, -3, 2.5); a stored 1/3 is ERROR: SYMCE LIMIT, and so is a
+ * complex value. Nothing stored is changed, and no other command looks.
+ *
  * FACTOR finds rational roots, then quadratic factors from the values at 0 and
  * ±1 (Kronecker), then groups by a variable's content; two variables are
  * factored when homogeneous, through Y=1. A quadratic left over is split over
@@ -237,6 +244,8 @@ typedef struct {
     uint8_t  kf[NV];          /* K_SIN.., */
     rat_t   *ka[NV], *kb[NV]; /* argument, and a logarithm's base (0: e) */
     rat_t   *tb;              /* TOLN's and TOLOGBASE's base (0: e) */
+    const uint8_t *(*look)(uint8_t);   /* letter token -> its stored TI real, or 0 */
+    uint8_t  sv;              /* SOLVE's variable: the other letters are looked up */
 } ps_t;
 
 static int is_digit(int c) { return c >= 0x30 && c <= 0x39; }
@@ -1007,7 +1016,12 @@ static int primary(ps_t *s, rat_t *out)
         return rset(&out->n.t[0], v, d);
     }
     if (is_var(c)) {
+        const uint8_t *v;
         s->i++;
+        if (c != s->sv && s->sv && s->look && (v = s->look(c))) {   /* its stored value */
+            pconst(&out->d, 1);
+            return preal(&out->n, v);
+        }
         rconst(out, 1);
         out->n.t[0].mono = 1u << 4 * (NV - 1 - s->rank[c - T_VAR0]);
         return 1;
@@ -4806,9 +4820,11 @@ syntax:
    `mode` is MODE_MP in MathPrint, where the screen fits more (width()), and
    MODE_DEC when the answer is to be in decimals wherever they end.
    `work` is SYMCE_WORK bytes of scratch. `ans` is the last answer as a length
-   byte then its tokens, or 0; it must not overlap `out`. MODE_DEG: degrees. */
+   byte then its tokens, or 0; it must not overlap `out`. MODE_DEG: degrees.
+   `look` (or 0) gives a letter token's stored real, 9 bytes, or 0 when
+   nothing is stored: SOLVE's other letters (see the top). */
 static uint8_t engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
-                      const uint8_t *ans, uint8_t mode)
+                      const uint8_t *ans, uint8_t mode, const uint8_t *(*look)(uint8_t))
 {
     uint8_t n, cmd, split, own;
     const char *name = cmds;
@@ -4843,6 +4859,11 @@ static uint8_t engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
     s.mp = mode & MODE_MP;
     s.deg = mode & MODE_DEG;
     s.lim = NPOOL; s.fn = 0; s.home = 0; s.nk = 0; s.inans = 0; s.tb = 0;
+    s.look = look; s.sv = 0;
+    if (cmd == C_SOLVE || cmd == C_CSOLVE) {    /* ", V" and maybe ")" close it */
+        k = len - (len && in[len - 1] == T_RPAR);
+        if (k >= 2 && in[k - 2] == T_COMMA && is_var(in[k - 1])) s.sv = in[k - 1];
+    }
 
     /* Ranks go out in alphabetical order, so comparing two packed monomials
        is already the tie-break the output wants. A byte in the variable range
@@ -4911,7 +4932,7 @@ limit:
    so never. Rev M+ (serial flash, cached) ignores the port and reads it as 0;
    0, or a value some other program already lowered, is left alone. */
 uint8_t symce_engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
-                     const uint8_t *ans, uint8_t mode)
+                     const uint8_t *ans, uint8_t mode, const uint8_t *(*look)(uint8_t))
 {
 #ifdef __ez80__
     volatile uint8_t *const ws = (uint8_t *)0xE00005;
@@ -4919,7 +4940,7 @@ uint8_t symce_engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
     if (old > 3)
         *ws = 3;
 #endif
-    uint8_t n = engine(in, len, out, work, ans, mode);
+    uint8_t n = engine(in, len, out, work, ans, mode, look);
 #ifdef __ez80__
     if (old > 3)
         *ws = old;

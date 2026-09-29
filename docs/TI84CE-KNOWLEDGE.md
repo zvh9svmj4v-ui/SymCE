@@ -247,6 +247,121 @@ at A=1 is the index in the tab. With `keyExtend` codes `00..09` (Algebra),
 `10..1D` (Calculus) and `20..2C` (Geometry) one key code, `0x21`, still
 covers all three tabs.
 
+### Font hook (measured 2026-09-28, 5.8.4)
+
+Measured with a temporary probe build (since removed; the shipped
+implementation is the "Implementation" paragraph at the end of this
+subsection). Verdict: a new
+system-wide font is **feasible with two hooks, not one**. The font hook
+(`0xD025ED`, `hookflags3` bit 5) only reaches the LARGE font; the small font's
+glyphs go through the LOCALIZE hook (`0xD02611`, bit 1).
+
+**Who calls what (*measured*, static + probe).** Only one `_CallFontHook`
+(`0x020130` -> `0x23A1C`) caller exists in the jump-table form; the OS calls
+`0x23A1C` directly from four places, each guarded by `bit 5,(iy+53)` (the OS
+checks the flag; the hook is not called with the bit clear):
+
+| A in | Routine | Registers in | Default (hook returns NZ) |
+|---|---|---|---|
+| 1 | `Load_LFont` `0x7BFEE` (also a copy at `0x18C0AB`) | `B` = char, `HL` = char*28 | copy 28 bytes from `boot.GetLFontPtr` (`0x3D6E`, = `0x380`) + `HL` to `0xD005A5`, zero-pad, return `HL = 0xD005A1` |
+| 2 | small-font WIDTH, `0xA55A9` (copy `0x1B56AE`) | `B` = char, `HL` = char*25 | `ld b,(0xA3CA9 + HL)`: `B` = width |
+
+If the font hook returns NZ, `Load_LFont` then calls the localize hook
+(`0x2398E`, `bit 1,(iy+53)`) with A = `0x76` (large glyph), and the small
+routines call it with A = `0x75` (`Load_Sfont` `0xA55D3`: small GLYPH, `B` =
+char, `HL` = char*25) and `0x77` (small width). **`Load_Sfont` never calls the
+font hook.** Z from the localize hook = "done". The localize hook also sees the
+OS's own translation calls (A = `00`, `1A..1C`, `B0..B9`, `D9`, `E3`, `E7`,
+`E9`, `EC`, `F2` seen): return NZ for anything but `75..77`.
+
+**Wrapper (`0x23A1C`, *measured* from disassembly).** Saves IX/AF/HL, loads
+the slot, reads its first byte, `cp 0x83`. Mismatch: it does `res 5,(iy+53)`
+(hook disables itself) and returns to the default. Match: `A` restored,
+`HL` = the caller's, `IX` = ptr+1, `call` it, `0x23955` (depth counter
+`0xD0265B`). The hook may clobber AF, DE, HL, **but must keep B** (the callers
+do `ld a,b` afterwards). Return **Z = "I filled the record, use it"**, NZ =
+"use your default". The localize wrapper is identical (slot `0xD02611`, bit 1);
+on a bad first byte it also writes `0x0109` to `0xD025CF` (`ld.sis`).
+
+**Large glyph (font hook A=1), *measured*.** Record at `lFont_record`:
+`0xD005A1..A3` zero, **`0xD005A4` = width byte**, `0xD005A5..C0` = 28 glyph
+bytes, `0xD005C1..C4` zero (`0xA256F` sets `(0xD005A4) = 0x0C` after
+`Load_LFont` returns, whatever the hook did, and ignores the returned `HL`:
+so the hook fills `0xD005A5..` and returns Z, **and must leave `0xD005A4` = 0**:
+the draw takes a 15th row, 2 bytes at `0xD005A3..A4`, ABOVE the glyph
+(*measured*: a hook that wrote the 0x0C itself put a 2-px tick, cols 9-10 of
+0x0C, one row over every glyph in menus; the ROM path never does, the default
+loader leaves `A1..A4` zero at draw time). Zeroing it fixed it. **14 rows x 2 bytes, top row
+first.** A row is 12 columns: **byte 0 bits 7..3 = columns 0-4, byte 1 bits
+7..1 = columns 5-11** (byte 0 bits 2..0 and byte 1 bit 0 are ignored). A solid
+`FF` glyph is a 12 x 14 block; the OS's own glyphs use columns 0-9 only (a 5+5
+split: 10 px wide, 2 px of spacing), advance is 12 px (monospace). The 256 ROM
+glyphs are at `0x3D6E + char*28` (ends exactly at `0x596E`); *measured*:
+'2' drawn matches its ROM bytes `38E0 78F0 C018 ...`. Char codes are DISPLAY
+glyph indices (0x12 = squared, 0x5B = theta, 0x10 = sqrt), not tokens.
+
+**Small glyph (localize A=0x75), *measured*.** Record `sFont_record`
+`0xD005C5`: **byte 0 = width (advance)**, then glyph bytes; on Z the OS
+zero-pads `0xD005DE..E1` itself and returns `HL = 0xD005C5`. The hook must
+fill all of `0xD005C5..DD` (25 bytes). Layout depends on the width:
+**width <= 8: 1 byte per row, 14 rows, MSB = left column; width > 8: 2 bytes
+per row, 12 rows, columns 0-7 from byte 0 and 8..width-1 from byte 1** (probed
+with width 11: bits past the width are clipped). Advance = the width byte
+(11 -> next glyph exactly 11 px on; the A=2 width query with B forced to 30
+did NOT move the next glyph). Glyphs at ROM `0xA3CA9 + char*25` (256 of them,
+ends at `0xA55A9`). ROM 'A': `08 | 00 00 30 78 CC CC FC FC CC CC CC CC CC 00
+..` (8 wide, drawn rows 2-12); sqrt (0x10) `0B | ...` (2 bytes/row).
+
+**MathPrint reduced glyphs are the SMALL font, cropped (*measured*).** A
+numerator/denominator `A` came from localize A=0x75 (probed with a pattern:
+period-4 rows, i.e. the 2-byte/row small record; solid `FF` gave an 8 x 10
+block). Only **rows 2..11 of the record are drawn (10 rows)**; the status bar
+draws rows 0..11. There is no separate reduced font and no font-hook call for
+them; `fracDrawLFont`/`fracTallLFont` (`fontFlags`, `iy+0x32` bits 2, 3) were
+never seen to matter for the fraction template (*inferred*: `0xA256F` takes the
+large path only when bit 2 or bit 6 of `iy+0x32` is set, and neither was set
+while the template drew).
+
+**Surfaces (solid 'A' seen in VRAM, counts from the probe log):**
+
+| Surface | Hook that drew it | Evidence |
+|---|---|---|
+| Home entry line + answer, Classic | font A=1 (12 x 14) | block, +11 calls per key |
+| Home entry line + answer, MathPrint | font A=1 | block 12 wide |
+| MathPrint n/d numerator/denominator | localize 0x75 (8 x 10, small) | block, 0x75 count up |
+| Status bar (NORMAL FLOAT AUTO ...) | localize 0x75 (small, rows 0-11) | block 8 x 12; A=1 histogram has none of its letters |
+| MATH menu (tabs + items) | font A=1 | `M#TH`, `FR#C`; A=1 +60, 0x75 +0 |
+| ERR:SYNTAX title + Quit/Goto | font A=1 | `SYNT#X` |
+| Y= editor | `Y1=` font A=1; `Plot1`, subscripts localize 0x75 | +46 / +50 calls (no capital A on screen) |
+| MODE screen body | localize 0x75 (proportional small font), A=1 +0 | +677 calls; `M#THPRINT`, `FLO#T` |
+| Graph text (`Y1=A` label, `X=`, `Y=`) | localize 0x75; font A=2 in TRACE only | solid small block; A=2 seen 2x per TRACE |
+
+Costs: one call per non-blank glyph (spaces and the cursor's `0xE0` count);
+prologue (boot, two APPS screens, installer, home) = 71 large-glyph calls;
+a key press on the home screen = 8-11; the MODE screen = ~740 small-glyph
+calls; the MATH menu ~60 large. With both hooks armed an unanswered large
+glyph costs two calls (font A=1, then localize 0x76). QUIT from Y= redraws the
+home screen with only ~11 large-glyph calls (it does not re-render every
+character), so no per-screen redraw figure is reliable.
+
+**Survival (*measured*).** Both hook pointers were inside the flash app
+(`0x1F45xx`). All 33 triggers of `crash.py` (Y=, WINDOW, MODE, GRAPH, ERR, STAT,
+APPS, TABLE, FORMAT, ZOOM, TRACE, CATALOG, MEM, LIST, DRAW, VARS, MATH, STAT
+EDIT, off/on, PRGM editor, GC, HORIZ, SymCE's menus/tabs) left both armed
+(`hookflags3 = 0x22`), left SymCE answering `4X`, and reset nothing.
+
+**Traps.** (1) (probe only: counts were read once at the end of a key
+sequence.) (2) A font pointer
+that does not start with `0x83` silently disarms itself. (3) Keep `B`; the
+callers restore `A` from it. (4) Hook Z with a wrong record, and no crash:
+you just get whatever is in `0xD005A4..` / `0xD005C5..`, so always fill the
+whole record (width byte first). (5) The large-font hook cannot change the
+advance (12, forced by `0xA256F`); the small font's advance is its width byte.
+(6) Small font needs the localize hook, which other code (translations) also
+calls: leave every A but `0x75..0x77` to the OS (return NZ). (7) SymCE
+takes the localize hook over while the Evo font is on (TI's language apps use
+it); the settings screen turns the font on and off with key 3, and CAS off (key 1) only clears the hooks that still point into SymCE.
+
 ### SymCE's hook (`symce/src/hook.c`)
 
 State, fixed RAM inside `saveSScreen` (zeroed when armed):
@@ -267,9 +382,19 @@ The app places two relocated words right after the body's last byte:
 engine; its image starts `jp menu_key`, `jp menu_tab`). The body reaches each with `ld hl,(hookPtr)` + offset, `ld hl,(hl)`,
 `jp (hl)`, after the same `83 FE 01` check.
 
+Then one byte, the cursor (`_symce_hook_end + 6`, read through `(hookPtr)`):
+the app carries the body twice, `symce_hook` with 0 (insert cursor, the
+default the installer arms) and `symce_hook_ti` with 1 (TI's own cursor). The
+settings screen (APPS > SymCE, key 2) arms one or the other with
+`SetHomescreenHook`: no RAM flag, no appvar, so the choice is lost with the
+hook on a RAM clear. Nonzero skips `set 4,(textFlags)` and the `(cxMain)`
+wrapping of the cursor keys in item 1 below: the keys pass to the OS with Z as
+if SymCE never touched the cursor. Only ALPHA+DOWN on the entry still goes to
+the menu. Everything else (ENTER marking, A=2, A=0) is the same in both.
+
 1. **A=1, any key:** `pending = 0`. On the home screen, set `textInsMode` if
    `editTop == baseTop` (cursor on the entry, not in a box or menu). There,
-   RIGHT LEFT UP CLEAR DEL 2nd-LEFT 2nd-RIGHT (`01 02 03 09 0A 0E 0F`) go
+   RIGHT LEFT UP DOWN CLEAR DEL 2nd-LEFT 2nd-RIGHT (`01 02 03 04 09 0A 0E 0F`) go
    through `(cxMain)` from the hook (`inKey` set, so the nested A=1 passes
    them on), `textInsMode` is set again if the cursor is still on the entry
    (not a box it moved into, not a history line UP selected; `baseTop` retaken
@@ -281,7 +406,7 @@ engine; its image starts `jp menu_key`, `jp menu_tab`). The body reaches each wi
 2. **A=2, `cxCurApp = 0x40`, `pending = 0xFF`:** check `(homescreenHookPtr)`
    still points at a body starting `83 FE 01`. Save OP1, find prog `#` with
    `ChkFindSym`, give OP1 back. Call `symce_engine(data+2, size, ansBuf,
-   engineWork, lastAns, mode)` (mode: `mpFlags & 0x20 | (iy+0x1A) & 1 | trigFlags & 4`) through the relocated pointer stored right after the
+   engineWork, lastAns, mode, look)` (mode: `mpFlags & 0x20 | (iy+0x1A) & 1 | trigFlags & 4`; `look`: the body's own `.Llook`, see §7 `_ChkFindSym`, real variables) through the relocated pointer stored right after the
    body's last byte. On an answer: copy it to `lastAns`, `pending = 0xFE`,
    return NZ, so the OS never evaluates it. No answer: return Z. `A = 0xFF`
    (a command the engine cannot finish): copy 26 bytes of `ansBuf`
@@ -374,11 +499,11 @@ Only test that gets `MATH 4, CLEAR, 2+2` (flat-looking `2+2` inside a radical)
 right. SymCE uses it only for insert mode now; the answer comes from prog `#`.
 
 **Insert mode ends on cursor keys (*measured* 2026-09-28, 5.8.4).** `textFlags`
-bit 4 is cleared by the OS's handling of RIGHT, LEFT, UP, CLEAR, DEL,
+bit 4 is cleared by the OS's handling of RIGHT, LEFT, UP, DOWN, CLEAR, DEL,
 2nd-LEFT/RIGHT (`0x0E`/`0x0F`) and ENTER, Classic and MathPrint alike (DEL:
 `res 4,(iy+5)` at `0x58A8A`; CLEAR and ENTER through the new-line routine,
-`set 5,(iy+12)` / `res 4,(iy+5)` at `0x58D0D`/`0x58D11`). DOWN and typing
-leave it; 2nd INS (`0x0B`) toggles it. The cursor draw (`0x5C80A`) picks
+`set 5,(iy+12)` / `res 4,(iy+5)` at `0x58D0D`/`0x58D11`). Typing
+leaves it; 2nd INS (`0x0B`) toggles it. The cursor draw (`0x5C80A`) picks
 underline or block from that bit on every blink; the MathPrint branch skips
 the cursor hook, so the flag is the only lever. SymCE sets it back after those
 keys (§4, A=1). After ENTER it stays clear until the next key: ENTER is not
@@ -446,6 +571,7 @@ most (`preal()` in `engine.c`).
 | `0x058733` | parse start | Sets `donePrgm` |
 | `0x0587D6` | NZ-return path | Prints "Done" if `donePrgm` still set |
 | `0x02050C` | `_ChkFindSym` | Pure VAT lookup, safe from a hook. OP1 = type + name; DE = data (size word first), carry = not found. Takes OP1 as input only: SymCE saves and restores it anyway |
+| `0x02050C` | `_ChkFindSym`, real variables | **Measured** (real ROM, e2e.py): OP1 = `00`, letter token (`A`..`Z` = `41`..`5A`, theta `5B`), `00` finds a real variable, DE = its 9-byte real in RAM with no size word (5 and 2.5 read back exactly); carry = not found. A complex is type `0C` (18 bytes, each half typed `0C`), which `.Llook` retries with. Used by the hook's `look(letter)` (SOLVE's stored values, called from the engine in C convention: letter at sp+3, result HL, ix kept), which saves OP1 on the stack and puts it back. `DelVar X` takes X out of the VAT (SOLVE then leaves X symbolic; the OS does not recreate it as 0). A real A-Z cannot be archived on OS 5.8.4 (`Archive X` and MEM Mgmt both give ERR:VARIABLE), so DE is never a flash pointer here. CATALOG (2nd 0) jumps with a letter key with no ALPHA (it opens in alpha lock; ALPHA would switch it off), DelVar is the fifth entry after dayOfWk( |
 | `0x0257C1` | hook pointer check | `HL` = address of a hook pointer: reads it, `IX` = pointer + 1, Z if the first byte is `0x83`. `0x257CB` then calls `(ix)`, so a hook gets `IX` = its own entry |
 | `0x023A6A` | parser hook caller | `bit 1,(iy+0x36)`; ParseInp calls it with A=0 at `0x99AEB`, after `begPC` is set. NZ there `jp 0x9B022`, the parser's unwind |
 | `0x020320` | `_Mov9ToOP1` | |
@@ -688,9 +814,9 @@ scratch hook, MathPrint and Classic). At A=2, after `pop iy` (so
   `-i 'PAD := n'` defines a symbol from the command line.
 - **SymCE app.** Appvars `SYMCE1`, `SYMCE2`, ... carry the app image (65,000
   bytes each after a 4-byte build id); `prgmSYMCE` (a few KB) writes it below
-  the last app and arms `symce_hook` inside it. Opening SymCE from APPS toggles
-  the hook. A RAM clear zeroes the hook pointer but keeps the app (flash);
-  opening the app re-arms it.
+  the last app and arms `symce_hook` inside it. Opening SymCE from APPS shows the settings
+  (1 CAS on/off, 2 insert/TI cursor = which body is armed, 3 Evo/TI font). A RAM
+  clear zeroes the hook pointer but keeps the app (flash); APPS > SymCE > 1 re-arms it.
 - **The installer replaces an installed SymCE** (*measured*): `FindAppStart`,
   `DeleteApp`, the pack `0x035E5D`, then the usual write below the last app and
   arm. Old builds refused ("already installed") and left the hook off, so a user
@@ -760,6 +886,29 @@ scratch hook, MathPrint and Classic). At A=2, after `pop iy` (so
   WINDOW, MODE survive; it still answers. So never cache an app address in RAM
   (SymCE keeps only data there): nothing says the OS would fix that up.
 - Cap'n Hook keeps hooks in RAM, so 5.8.3+ rejects it too.
+- **An app can run an asm program itself** (*measured* 2026-09-29, settings row
+  `5: Run prgmSYMCE`, `runPrgm` in main.asm): 5.8.4's block is only in the
+  parser, so an app that copies the program to `userMem` and jumps to it runs it
+  with AsmHook2 out of the picture, even after a RAM clear (`prgmSYMCE` is
+  archived, so it survives one). Recipe, as AsmHook2's parser does it:
+  `_ChkFindSym` (OP1 = `ProtProgObj "SYMCE"`), skip the archive entry header if
+  archived, size word, check `EF 7B`; `_EnoughMem`; `_InsertMem`; `ldir`; `jp
+  userMem`. ABIs *measured*: `_EnoughMem` HL = bytes, NC = fits, returns (no
+  throw, unlike `_ErrNotEnoughMem`); `_InsertMem` **HL = bytes, DE = address**
+  (HL = address, DE = bytes resets the calculator) and returns DE = the address;
+  `_DelMem` HL = address, DE = bytes. `asm_prgm_size` = `0xD0118C`, 3 bytes;
+  set it to the inserted length and clear it again after `_DelMem`.
+- **Never return into an app that a program deletes.** The installer deletes and
+  rewrites the app that ran it (at another address if the size changed), so
+  `runPrgm` copies a 25-byte stub after the program, inside the same inserted
+  block (the installer's `DelVarArc` only moves RAM above it), and pushes the
+  stub as the program's return address. The stub sets `asm_prgm_size` 0, pushes
+  `_JForceCmdNoChar` and tail-jumps `_DelMem(userMem, size)`, freeing program and
+  stub in one call and "returning" to the home screen. It uses only absolute OS
+  addresses, so it needs no relocation. Free RAM `(OPS)-(FPS)` and
+  `asm_prgm_size` came back exactly (86,616 before and after, 0), and the
+  installer screen matched the one shown when AsmHook2 launches it, pixel for
+  pixel.
 
 ---
 
@@ -1088,7 +1237,7 @@ scratch hook, MathPrint and Classic). At A=2, after `pop iy` (so
 - On the ROM, `make -C symce emu`: `crash.py` (Y=, WINDOW, MODE, GRAPH, ERR, STAT,
   APPS, the ALPHA+DOWN menu all survive), `e2e.py` (answers, echo, recall,
   re-run, the menu in both modes), `lifecycle.py`
-  (install, toggle, RAM clear, re-arm), `bigapp.py` (the app padded to at least 132 KB: fresh,
+  (install, settings keys, RAM clear, re-arm), `bigapp.py` (the app padded to at least 132 KB: fresh,
   over an old SymCE, RAM clear and reinstall, a GC to make room, a missing or
   foreign appvar, no room keeps the old app), `engine_device.py`: links the exact
   `obj/engine/engine.s` into a CEdev test program (`tools/emu/engtest`), runs
@@ -1116,6 +1265,142 @@ scratch hook, MathPrint and Classic). At A=2, after `pop iy` (so
     before a clean run counts.
   - For SymCE's float core, 16,400 cases (fmul, fdiv, fadd, fset, toint)
     matched.
+
+---
+
+## 11b. Graph screen (*measured* 2026-09-29, 5.8.4, branch `graph-probe` d30f1d1)
+
+Probed with a regraph hook (`hookflags3` bit 6, slot `0xD025F0`) in `src/rhook.c`
+on that branch; the drivers are the gitignored `tools/emu/_graph*.py`.
+
+- **The OS graph area is fixed.** Full mode: x=27, y=46, 265x165 px. Horizontal
+  split: 265x81. G-T: 185x145 at x=4. `0xD014FC` is x0, `0xD014FE` the height,
+  `0xD014FF` the width (2 bytes); the names in `ti84pceg.inc` are misleading.
+  Raising them moves the axes, but the OS clears a fixed white rectangle, so the
+  graph does not get bigger.
+- **OS draw times**, ZStandard, Full, 133 points (timed by holding the zoom key,
+  then a CRC of VRAM rows 46..210 until it stops changing; precision about 4 ms;
+  autotester delays track emulated time 1:1):
+
+  | Y= | ms |
+  |---|---|
+  | `X` | 1864 |
+  | `sin(X)` | 2804 |
+  | `X^2` | 1624 |
+  | `sin(X)/X+cos(3X)` | 5740 |
+  | `sqrt(X)` | 1544 |
+  | `sin(X)`, `cos(X)`, `X^2/5` together | 7480 |
+
+- **Regraph hook events** (A on entry), CE: `00`, `01`, `02`, `09` once each;
+  per point `03` (OP1 = X), `08` (OP1 = the equation name `03 5E 10`, OP4 =
+  `00 58`), the parse, `04` (OP1 = x, OP2 = y), `08`, `05`, `06`; `07` once at
+  the end. The hook could not feed y to skip the parser, so the OS stays at
+  about 14-40 ms per point whatever the hook does.
+- SymCE's scratch at `0xD0EE00` survives graphing.
+- Consequence: SymCE draws its own graph (`src/graph.c`, the settings screen's
+  `4: Graph`), straight into VRAM, full screen, in float32.
+
+### SymCE's grapher on the calculator (*measured* 2026-09-29, `tools/emu/graph.py`)
+
+- **Draw time**, `4` key to the last change of VRAM rows 0..219 (CRC every
+  20 ms, so +-20 ms; 80 ms steps once a draw passes 1 s). First version, then
+  after the fixes below, against the OS graph (§11b):
+
+  | Y= | first | now | OS |
+  |---|---|---|---|
+  | none selected (fixed cost) | 340 | 20 | - |
+  | `X` | 440 | 80 | 1864 |
+  | `sin(X)` | 660 | 320 | 2804 |
+  | `X^2` | 420 | 60 | 1624 |
+  | `sin(X)/X+cos(3X)` | 2640 | 640 | 5740 |
+  | `sqrt(X)` | 500 | 140 | 1544 |
+  | `sin`,`cos`,`X^2/5` | 2160 | 800 | 7480 |
+
+- **Profile.** Two things were wrong. (1) The full-screen clear, a C loop of
+  76,800 stores with a 32-bit counter run from flash (10 cycles per instruction
+  byte, §flash-is-slow), took about 320 ms of the 340 fixed; `memset` (libc's
+  is an ldir) makes it under 20 ms. The asm glue's VAT and variable copying and
+  the info bar (an ldir of 20 rows) are inside the remaining <20 ms. (2) The
+  `GetKey` battery icon: it is drawn about 3.7 s after the draw, into rows
+  0..219, so the "last change" of every function with a trig call read 2-3 s
+  too long (`cos(3X)` 360 ms alone, `cos(3X)+X` 3760 ms: not the add, the
+  icon). The rest is soft-float: `sinf`/`cosf` cost about 1 ms per call (300 ms
+  per 320 columns); `X` alone is about 190 us per column (the mapping's floats).
+  ponytail: the mapping was left as it is; `x += dx` would save one multiply.
+- **Keys**: the viewer polls `GetCSC` (no status bar drawn: the battery icon is
+  gone). 2nd then MODE = QUIT, CLEAR leaves. A held arrow repeats: after each
+  draw the asm reads keypad group 7 (`0xF5001E`, bit set = down: Down 0, Left
+  1, Right 2, Up 3) and pans again while it is down, so the pan rate is the draw
+  time. Measured with `hold|right` for 700 ms: a tap moves the axis to column
+  120, the hold pans it off the screen. No APD in the loop (like the menu's).
+- `ChkFindSym` on `03 5E 1n`: the flag byte is at `HL - 1` (selected = bit 0),
+  `DE` is the data with the size word first; works. `ChkInRam` keeps `DE`.
+- The app's `iy` is `ti.flags`; C clobbers it, so it is reloaded after each call.
+- `GetKey` on our own full-screen VRAM draws the OS battery icon top right
+  (about 20x12 px, some seconds later); `GetCSC` does not. `VPutS` with
+  `drawFGColor`/`drawBGColor` set by hand works for the bar.
+- 160 KB of appvars no longer fit in RAM together: `bigapp.py`'s "no room keeps
+  old SymCE" case sent them to RAM and failed with `SYMCE3 is missing`. It now
+  sends them archived into a ROM with three sectors erased for them (the archive
+  is full again after), and the "empty appvar" case has its own full ROM.
+
+### What a grapher reads (*measured* 2026-09-29, `tools/emu/_gm2.py`: type in Y=, quit, dump RAM)
+
+- **Y1..Y0 in the VAT.** Each is an equation entry, type `03` (`EquObj`), name
+  `5E 10..19` (`tVarEqu`, then `tY1`..`tY9`, `tY0`; `20..2B` are X1T..Y6T, `40..45`
+  r1..r6, `80..82` u v w). The 9-byte VAT entry, ascending in RAM (the table
+  grows down from `0xD3FFFF`): `00 nn 5E ah am al 00 fl 03`: name reversed with
+  a `00` terminator, the data pointer big-endian, a `00`, then the flag byte
+  `fl` just under the type. **`fl` bit 0 is "selected" (the `=` sign
+  highlighted): `01` selected, `00` not** (Y3 deselected with 2nd LEFT, LEFT,
+  ENTER in Y=: `fl` 01 -> 00; LEFT x3 is the line-style icon and does not toggle
+  it). An equation never typed has `fl = 00` and a size word of 0. So a Yn is
+  plotted when `fl & 1` and its size is nonzero. Y1..Y0's data sits at
+  `0xD2A8B4..`, each `size word (2) + tokens`, no terminator; `ChkFindSym` with
+  OP1 = `03 5E 10` finds it (DE = data, size word first; the flag is the byte
+  below the type byte, so it is at `HL - 1` if `HL` is the entry).
+- **How the Y= editor stores MathPrint** (*measured*: 27 equations typed in
+  MathPrint, mode word `0xD000C4 = 2E`, bit 5 = MathPrint). The stored tokens
+  are the same flat ones the OS parses; nothing 2D survives:
+
+  | typed | stored |
+  |---|---|
+  | `X^2` (box) | `58 0D` (the `²` token) |
+  | `X^3` (math 3) | `58 0F` |
+  | `X^4` | `58 F0 34` (`^` then the digit, no parentheses) |
+  | `X^12` | `58 F0 31 32` |
+  | `X^(-1)` | `58 0C` (the `⁻¹` token) |
+  | `X^(1/2)` | `58 F0 10 10 31 EF 2E 32 11 11` |
+  | n/d, 1 over X | `31 EF 2E 10 58 11`: the bar `EF 2E`, den parenthesised |
+  | n/d, X over 1 | `10 58 11 EF 2E 31`: num parenthesised; a bare number is not |
+  | n/d, (X+1) over (X-1) | `10 58 70 31 11 EF 2E 10 58 71 31 11` |
+  | `√(X)` | `BC 58 11` (`√(` `X` `)`) |
+  | `abs(X)` | `B2 58 11` |
+  | `e^(X)` | `BF 58 11` |
+  | `10^(X)` | `C1 58 11` |
+  | `√(1/X)` | `BC 31 EF 2E 10 58 11 11` |
+  | `X^2` then `1` after leaving the box | `58 0D 70 31` |
+  | `1E3X` | `31 3B 33 58` (`EE` is `3B`) |
+  | `-X+π+e+A+θ` | `B0 58 70 AC 70 BB 31 70 41 70 5B` (`π` `AC`, `e` `BB 31`, negation `B0`) |
+
+  So the grapher needs no box parsing: the bar is a `/` (one level with `*`,
+  left to right, as engine.c's `peek`), the `²`/`³`/`⁻¹` tokens are postfix, and
+  the rest are ordinary tokens. The `(` after `√`/`abs`/`e^`/`10^` is part of
+  the function token, its `)` is a `11` that may be missing at the end.
+- **Window.** Nine-byte TI reals (byte 0 sign in bit 7, byte 1 = `0x80` + exponent,
+  bytes 2..8 the 14 BCD digits `d.ddd`): `Xmin 0xD01E33`, `Xmax 0xD01E3C`,
+  `Xscl 0xD01E45`, `Ymin 0xD01E4E`, `Ymax 0xD01E57`, `Yscl 0xD01E60`. After
+  ZStandard: `80 81 10 00..` (-10), `00 81 10 ..` (10), `Xscl 00 80 10` (1);
+  after WINDOW -5, 7, 1, -3, 4 they read `80 80 50`, `00 80 70`, `80 80 30`,
+  `00 80 40`. **Degree flag: `trigFlags` (iy+0, `0xD00080`) bit 2**: 0x20 in
+  Radian, 0x24 after MODE Degree.
+- **Line colours.** `y1LineColor..y0LineColor` at `0xD024D8..0xD024E1`, one byte
+  each, and `y1LineType..` at `0xD024BF..` (all 01 by default). Defaults
+  `01 02 03 04 05 06 07 01 02 03`; the pixels those draw in the OS graph (VRAM
+  RGB565): 1 blue `001F`, 2 red `F800`, 3 black `0000`, 4 magenta `F81F`,
+  5 green `04E0`, 6 orange `FC64`, 7 brown `B100`. Indices 8 and up are unmeasured
+  (Y= lets you pick more colours). The OS graph area is white `FFFF` on a
+  `E71C` screen background.
 
 ---
 
@@ -1264,6 +1549,138 @@ exponent box (*measured*, VRAM), and pasting it back re-runs to itself.
 
 ---
 
+## 13. From the CE toolchain docs (read 2026-09-28)
+
+Source: https://ce-programming.github.io/toolchain/. Everything below is
+**documented** (from the toolchain's own pages), not measured, unless said
+otherwise. The header docs almost never print numeric addresses or bit
+positions for `#define`s, only symbolic names — so most of this is
+canonical naming to check against our measured bytes, not new addresses.
+
+### Memory map / VRAM color order
+**Unresolved.** `ti/screen.h` calls `os_TextFGColor`/`os_TextBGColor`/etc.
+"565 BGR color", and `lcddrvce.h` gives `LCD_MADCTL_DEFAULT = LCD_BGR`
+("BGR order (swap red and blue)") as the TI-OS panel default; §2 and §11's
+`vram.py` call the VRAM bytes RGB565. The docs may name the panel's wiring
+rather than the byte layout, and neither they nor our SDK includes list
+the OS color values that would settle it. Harmless for SymCE: `vram.py`
+only separates dark from light pixels, which an R/B swap doesn't change.
+Check before doing real color math on VRAM bytes.
+
+### C ABI
+- Args: pushed right-to-left, **always 3 bytes/slot** even for smaller
+  types (upper byte(s) are garbage for `char`/`short`). `sp+[0,2]` is the
+  return address, args start at `sp+3`. Sizes: `char`=1, `short`=2,
+  `int`/pointer=3, `long`/`float`/`double`=4 (`sp+[3,6]`),
+  `(u)int48_t`=6, `long long`/`long double`=8 (`sp+[3,10]`).
+- Returns by type: `char`->`A`, `short`->`HL`, `int`/pointer->`UHL`,
+  `long`/`float`/`double`->`E:UHL`, `long long`/`long double`->
+  `BC:UDE:UHL`.
+- `IX` and `SP` are the only callee-preserved registers; everything else
+  is free to clobber (matches this project's asm, which saves no more).
+
+### OS flags: hook-enable byte member names
+`0xD000B4..B6` (§3) are each documented as one 8-member `GROUP`, listed in
+bit order (bit 0 = first member); no numeric bit values are ever printed.
+- **hookflags4** (`0xD000B6`): trace, **parser**, appChange, catalog1,
+  help, cxRedisp, **menu**, silentLink — this order is now **confirmed**:
+  it puts parser at bit 1 and menu at bit 6, exactly matching the two
+  independently measured bits at line 75.
+- **hookflags3** (`0xD000B5`): token, localize, window, graph, yEqu, font,
+  regraph, drawing (full 8; line 74 names only 4, unordered).
+- **hookflags2** (`0xD000B4`): getCSC, library, homescreen, rawKey,
+  catalog2, cursor — only 6 of 8 slots named. Naive positional order
+  would put homescreen at bit 2, but line 73 measures
+  `homescreenHookActive` at bit 4, so positional inference does **not**
+  hold for a partial (non-8/8) group; don't trust it here.
+- **hookflags5**: single member `USBActivity` (bit unknown).
+- Two whole flag-group bytes are officially reserved for us:
+  `OS_FLAGS_ASM1`/`OS_FLAGS_ASM2`, "intentionally unused by TI, available
+  for programs" (byte address not given, would need measuring).
+
+### Error handling
+`os_ThrowError(uint8_t error)` (noreturn) raises an OS error from the
+`OS_E_*` enum (~52 symbolic codes; `OS_E_APPERR1`/`OS_E_APPERR2` are free
+for app use). `os_PushErrorHandler(void)` returns twice like `setjmp`: 0
+on the first return, the error number on the second (an error thrown
+before `os_PopErrorHandler`). No C++ destructor unwinding.
+
+### Timers
+Reservations: **Timer 1** = `clock()`/`sleep()`, **Timer 2** = usbdrvce,
+**Timer 3** = "used by the TI-OS USB stack and shouldn't be touched in
+almost every case... may cause the above functions and/or libraries to
+not work correctly." **Tension**: §11's tooling uses Timer 1 as a cycle
+counter (line 1098) and Timer 3 as a 32 kHz stopwatch (line 942) directly
+— fine for host-side/CEmu scratch tooling that never runs alongside the
+OS's own USB stack, but not safe to reuse inside anything that ships.
+`timer_Get()` is unsafe when a timer runs at `TIMER_CPU` rate (no atomic
+32-bit read on this hardware); `timer_GetSafe(n, dir)` is the safe form.
+
+### Debugging aids (`debug.h`, gated by `make debug`)
+`dbg_printf`/`dbg_sprintf` (CEmu console output), `dbg_Debugger()` (drops
+into CEmu's debugger), `dbg_WatchpointSet(addr, size, mask)` /
+`dbg_WatchpointRemoveAll()`, `dbg_ClearConsole()`. CEmu-only, no effect on
+real hardware.
+
+### OS/system info
+`os_GetSystemInfo()` fills a `system_info_t`: `hardwareVersion` (7 on
+CE/83PCE, 8 on 82AEP), `hardwareType`/`hardwareType2`,
+`osMajorVersion`/`osMinorVersion`/`osRevisionVersion`/`osBuildVersion`
+(e.g. 5/4/0/34 for "OS 5.4.0.0034"), matching `boot*Version` fields,
+`calcid[8]` (from the device certificate), `language` (`EN=0x109`,
+`FR=0x10C`, ...). **Bears on open question 3** (whether other 5.8.x
+builds keep `0x91FC2`/`0x97C7F` unchanged): this is the documented way to
+read the exact OS build directly, instead of only inferring it from
+whether the two routine fingerprints still match.
+
+### APD (automatic power-down)
+`os_EnableAPD()`/`os_DisableAPD()` toggle it; `os_ApdFlags`, `os_ApdTimer`,
+`os_ApdSubTimer` expose its state (no bit/offset numbers given). **Bears
+on open questions 5 and 6** (paste-pending window, ALPHA+DOWN menu loop):
+`os_DisableAPD()` around either window would remove the "untested whether
+APD fires" uncertainty outright; `os_ApdFlags` could also just be read to
+check APD's current arm state instead of live-testing on hardware.
+
+### real_t / exact-value types
+- `real_t`: `int8_t sign; int8_t exp; uint8_t mant[7]` (9 bytes, BCD
+  mantissa, one decimal digit per nibble, 14 digits). Exponent is an
+  8-bit field the OS limits to +/-99 — matches this project's own
+  `preal()` (`engine.c:923`), which never calls the OS's `os_Real*` API
+  and reimplements this format from scratch, portably.
+- Native OS "exact answer" VAT types are named `OS_TYPE_REALFRAC`,
+  `OS_TYPE_EXACTREALRAD`/`EXACTCPLXRAD`,
+  `OS_TYPE_EXACTREALPI(+FRAC)`/`EXACTCPLXPI(+FRAC)`. No numeric type-byte
+  values given, so this doesn't confirm §7's measured type `0x18` (the
+  OS's own `1/3►Frac` type) — just names to check against if it's ever
+  measured which one that byte is.
+
+### Toolchain / build
+- `symce/makefile` sets none of `LTO`/`PREFER_OS_LIBC`/`PREFER_OS_CRT`/
+  `HAS_MATH_ERRNO`, so the build uses documented defaults: `LTO=YES`,
+  `PREFER_OS_LIBC=YES`, `PREFER_OS_CRT=NO`, `HAS_MATH_ERRNO=NO` (`errno`
+  not maintained on math functions — irrelevant here, engine.c never
+  checks `errno`).
+- `printf`/`sprintf` cost ~8 KiB of program size; engine.c/hook.c use
+  neither (grep-confirmed), so this is a non-issue, not a fix to make.
+- The toolchain assembles with GAS (GNU as); fasmg "is no longer
+  supported" for assembly linked with C (the getting-started page still
+  has fasmg install steps). Our hand-built flash-app sources
+  (`installer.asm`, AsmHook2) are fasmg syntax, fetched by
+  `tools/get-fasmg.sh` (§8). The docs also call inline asm "highly
+  discouraged" (compiler changes may break it); `symce/src/hook.c` is
+  file-scope `__asm__` passed through clang to GAS. Porting it to a plain
+  `.s` was weighed 2026-09-28 and skipped (same bytes, token cost > gain);
+  do it if a CEdev/clang update ever breaks the hook build.
+- Flash is documented read-only at runtime: "the calculator's hardware
+  prevents you from writing to flash, and in fact, attempting to do so
+  will cause a crash." **Soft tension** with §8 lines 677-678, where the
+  installer writes flash successfully via a port-unlock sequence
+  (`portUnlock` / `out0 ($24),$8C` / bit 2 of port `$06`) that the
+  toolchain docs never mention — not a real contradiction, just
+  confirmation that the port trick is undocumented/unofficial.
+
+---
+
 ## Open questions
 
 - Exact `lowest_app_addr` on the user's calc (about `0x18403C` in the test ROM).
@@ -1284,3 +1701,25 @@ exponent box (*measured*, VRAM), and pasting it back re-runs to itself.
   `0xD0009A` bit 6 or `0xD0009B` bit 5 depending on the run, and `.25` still
   filed as `0.25`, type 0, in history. SymCE ignores FRAC-APPROX (it only
   changes how the OS shows its own decimals).
+
+**Implementation (SymCE, evo-font branch).** `src/fhook.c` (73 B, slot
+`0xD025ED`) and `src/lhook.c` (67 B, slot `0xD02611`) answer from one shared
+256-byte `font_map` (0 = not ours, else 1-based record number) plus per-font
+record tables (`font_large` 28 B/glyph, `font_small` 25 B/glyph) generated by
+`tools/mkfont.py build` from the hand-edited `symce/font/{large,small}.txt`
+into `obj/font.inc`. 101 covered display indices: `0x21..0x7E` (`0x5B` is
+theta), `0x12` squared, `0xD5` cubed, `0x17` `<=`, `0x18` `!=`, `0x19` `>=`,
+`0x1C` arrow, `0xC4` pi. Everything else falls through to TI's glyph. Small
+glyphs keep TI's advance width exactly, so no layout moves. The hooks are
+position independent: the slot holds the body's base (the OS is calling
+through it), and the two `dl` words placed just past the body (map,
+records less one record) are relocated by `app_create`, so the bytes run
+unmodified in `tools/ez80sim.py`. A hit copies the record to `0xD005A5`
+(+ width `0x0C` at `0xD005A4`) / `0xD005C5` (width first) and returns Z with
+`HL = 0xD005A1` / `0xD005C5`; a miss returns NZ with everything but A
+restored. `ldir`, `mlt de` and `ld hl,(hl)` are used. Toggle: `hookflags3`
+enable bits and our pointers only ("on" = our pointer with the bit set);
+`prgmSYMCE` and APPS>SymCE arm both, key 1 on the ON screen flips them,
+APPS>SymCE OFF clears each only if it points into SymCE. The app grew by
+about 6 KB (138,023 to about 144 KB). Licence: glyphs derive from Roboto
+(SIL OFL 1.1, `symce/font/OFL.txt`).

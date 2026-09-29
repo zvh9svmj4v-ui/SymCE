@@ -139,19 +139,28 @@ __asm__(
 "\tor\ta, a\n"
 "\tsbc\thl, de\n"
 "\tjr\tnz, .Lnoins\n"
+/* The byte after the two words says whose cursor this body is: nonzero is TI's
+   own (SymCE's settings screen arms that copy), and then the insert mode and
+   the wrapped cursor keys below are skipped, but ALPHA+DOWN still opens the menu. */
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, _symce_hook_end + 6 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tld\ta, (hl)\n"
+"\tor\ta, a\n"
 "\tld\thl, textFlags\n"
+"\tjr\tnz, .Lti\n"
 "\tset\t4, (hl)\n"
 "\tld\ta, b\n"
 "\tcp\ta, 0x08\n"
 "\tjr\tz, .Lad\n"
-/* RIGHT LEFT UP (1..3), CLEAR DEL (9, 0x0A), 2nd LEFT/RIGHT (0x0E, 0x0F): the
+/* RIGHT LEFT UP DOWN (1..4), CLEAR DEL (9, 0x0A), 2nd LEFT/RIGHT (0x0E, 0x0F): the
    OS ends insert mode on these (DEL: res 4,(iy+5) at 0x58A8A; CLEAR through the
    new-line routine, 0x58D11), so the cursor showed as a block until the next
    key set it again. Run the key through (cxMain) here, then set it back and
    swallow the key. cxMain calls this hook at A=1 first; inKey passes that one
    on, and clears itself so a key that never came back cannot leave it set. */
 "\tdec\ta\n"
-"\tcp\ta, 3\n"
+"\tcp\ta, 4\n"
 "\tjr\tc, .Lwfar\n"
 "\tsub\ta, 8\n"
 "\tcp\ta, 2\n"
@@ -170,6 +179,11 @@ __asm__(
 "\tret\n"
 ".Lnotkey0:\n"
 "\tjr\t.Lnotkey1\n"
+".Lti:\n"
+"\tld\ta, b\n"
+"\tcp\ta, 0x08\n"
+"\tjr\tz, .Lad\n"
+"\tjr\t.Lnoins\n"
 /* ALPHA+DOWN there, and not on a selected history line (cmdFlags bit 4, which
    leaves editTop alone in Classic): the menu. */
 ".Lad:\n"
@@ -430,8 +444,8 @@ __asm__(
 "\tld\tbc, 9\n"
 "\tldir\n"
 "\tpop\thl\n"
-"\tjr\tc, .Lz2\n"
-/* symce_engine(tokens, size, ansBuf, engineWork, lastAns, mode). It is compiled
+"\tjr\tc, .Lzs\n"
+/* symce_engine(tokens, size, ansBuf, engineWork, lastAns, mode, look). It is compiled
    C, so the C convention: arguments on the stack, last one pushed first, three
    bytes each, popped by the caller; the result in A; ix preserved and
    everything else clobbered -- iy included, which the OS needs back as its
@@ -442,6 +456,11 @@ __asm__(
 "\tld\td, (hl)\n"
 "\tinc\thl\n"
 "\tpush\tiy\n"
+"\tld\tbc, .Llook - _symce_hook\n"   /* look, the last argument: .Llook below, for SOLVE's letters */
+"\tpush\thl\n"
+"\tld\thl, (hookPtr)\n"
+"\tadd\thl, bc\n"
+"\tex\t(sp), hl\n"                /* hl (the tokens) back, look on the stack */
 "\tld\ta, (ansFlags)\n"            /* mode: DEC wants decimals where they end, */
 "\tand\ta, 1\n"
 "\tld\tc, a\n"
@@ -474,8 +493,10 @@ __asm__(
 "\tadd\thl, de\n"
 "\tld\thl, (hl)\n"
 "\tjp\t(hl)\n"
+".Lzs:\n"                        /* .Lz2, out of jr range of the jr c above */
+"\tjr\t.Lz2\n"
 ".Lback:\n"
-"\tld\thl, 18\n"
+"\tld\thl, 21\n"
 "\tadd\thl, sp\n"
 "\tld\tsp, hl\n"
 "\tpop\tiy\n"
@@ -576,6 +597,55 @@ __asm__(
 "\tpop\tde\n"
 "\tpop\thl\n"
 "\tcp\ta, a\n"
+"\tret\n"
+/* look(letter), called by the engine (C convention, letter in the slot at
+   sp+3, result in hl, ix kept): the real stored in that letter, or 0. A real
+   variable is OP1 = 00 letter 00, theta 0x5B like its token; a complex one
+   0x0C, which the engine refuses. ChkFindSym takes OP1 as its input, so OP1
+   is put back. DE is the value itself, not a copy: RAM, or flash if archived. */
+".Llook:\n"
+"\tpush\tix\n"
+"\tld\thl, (OP1)\n"
+"\tpush\thl\n"
+"\tld\thl, (OP1 + 3)\n"
+"\tpush\thl\n"
+"\tld\thl, (OP1 + 6)\n"
+"\tpush\thl\n"
+"\tld\thl, 0\n"
+"\tpush\thl\n"                     /* the type to try */
+"\tld\tiy, 0x0D00080\n"
+".Lltry:\n"
+"\tld\tix, 0\n"
+"\tadd\tix, sp\n"
+"\tld\ta, (ix + 0)\n"
+"\tld\thl, OP1\n"
+"\tld\t(hl), a\n"
+"\tinc\thl\n"
+"\tld\ta, (ix + 18)\n"
+"\tld\t(hl), a\n"
+"\tinc\thl\n"
+"\tld\t(hl), 0\n"
+"\tcall\tchkFindSym\n"
+"\tjr\tnc, .Llfound\n"
+"\tld\tix, 0\n"
+"\tadd\tix, sp\n"
+"\tld\ta, (ix + 0)\n"
+"\tor\ta, a\n"
+"\tld\tde, 0\n"
+"\tjr\tnz, .Llfound\n"
+"\tld\ta, 0x0C\n"
+"\tld\t(ix + 0), a\n"
+"\tjr\t.Lltry\n"
+".Llfound:\n"
+"\tpop\thl\n"
+"\tpop\thl\n"
+"\tld\t(OP1 + 6), hl\n"
+"\tpop\thl\n"
+"\tld\t(OP1 + 3), hl\n"
+"\tpop\thl\n"
+"\tld\t(OP1), hl\n"
+"\tex\tde, hl\n"
+"\tpop\tix\n"
 "\tret\n"
 "_symce_hook_end:\n"
 );

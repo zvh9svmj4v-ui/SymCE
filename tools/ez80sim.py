@@ -100,7 +100,7 @@ def engine(entry, last=b'', mode=0):
 
 
 class Sim:
-    def __init__(self, code, org=0x100000):
+    def __init__(self, code, org=0x100000, tail=0):
         self.mem = {}
         self.org = org
         for i, b in enumerate(code):
@@ -119,11 +119,12 @@ class Sim:
         self.calls = []           # (target, a, hl, de, bc) for every call nn
         # The words just past the body point at the engine and the menu, as in
         # the app; the stubs sit right after them, where main.asm puts the
-        # real ones.
-        self.engine_at = org + len(code) + 6
-        self.menu_at = org + len(code) + 7
+        # real ones. Then a byte: 0 is the insert-cursor body, 1 is TI's own.
+        self.engine_at = org + len(code) + 7
+        self.menu_at = org + len(code) + 8
         self.w24(org + len(code), self.engine_at)
         self.w24(org + len(code) + 3, self.menu_at)
+        self.w8(org + len(code) + 6, tail)
         self.engine_calls = []    # (in, len, out, work, ans, mode) for every engine call
         self.menu_calls = 0       # symce_menu() calls
         self.menu_ret = 0xBADBAD  # what it returns in HL
@@ -135,9 +136,9 @@ class Sim:
         self.w24(CX_MAIN_PTR, CX_MAIN)
 
     def _engine(self):
-        """symce_engine(in, len, out, work, ans, mode), with the C calling convention:
+        """symce_engine(in, len, out, work, ans, mode, look), with the C calling convention:
         the return address on top, then the arguments first to last."""
-        ret, src, n, out, work, ansp, mode = (self.r24(self.sp + 3 * i) for i in range(7))
+        ret, src, n, out, work, ansp, mode, look = (self.r24(self.sp + 3 * i) for i in range(8))
         mode &= 0xFF              # a uint8_t: C reads the slot's low byte
         self.engine_calls.append((src, n, out, work, ansp, mode))
         last = bytes(self.r8(ansp + i) for i in range(65)) if ansp else b''
@@ -325,6 +326,9 @@ class Sim:
         elif op == 0x7A: self.a = (self.de >> 8) & 0xFF            # ld a,d
         elif op == 0x7B: self.a = self.de & 0xFF                   # ld a,e
         elif op == 0x37: self.fc = True                            # scf
+        elif op == 0x57: self.de = (self.de & 0xFF00FF) | self.a << 8  # ld d,a
+        elif op == 0x58: self.de = (self.de & 0xFFFF00) | self.b       # ld e,b
+        elif op == 0x1E: self.de = (self.de & 0xFFFF00) | self.imm8()  # ld e,n
 
         # ---- 24-bit loads ----
         elif op == 0x01: self.bcset(self.imm24())                  # ld bc,nn
@@ -350,6 +354,7 @@ class Sim:
             self.hl = (self.hl & 0xFFFF00) | ((self.hl + 1) & 0xFF)
         elif op == 0x23: self.hl = (self.hl + 1) & 0xFFFFFF        # inc hl
         elif op == 0x13: self.de = (self.de + 1) & 0xFFFFFF        # inc de
+        elif op == 0x09: self._add16(self.bc())                 # add hl,bc
         elif op == 0x19: self._add16(self.de)                      # add hl,de
         elif op == 0x29: self._add16(self.hl)                      # add hl,hl
         elif op == 0x39: self._add16(self.sp)                      # add hl,sp
@@ -403,6 +408,11 @@ class Sim:
             self.b = (self.b - 1) & 0xFF
             if self.b: self.pc += d
         elif op == 0xE9: self.pc = self.hl                         # jp (hl)
+        elif op == 0xC0:                                           # ret nz
+            if not self.fz:
+                if not self.nest: return False
+                self.nest -= 1
+                self.pc = self.pop()
         elif op == 0xC9:                                           # ret
             if not self.nest: return False
             self.nest -= 1            # the hook's call back from cxMain returning to it
@@ -510,6 +520,8 @@ class Sim:
             elif o2 == 0x33: self.iy = (self.iy + self.disp()) & 0xFFFFFF  # lea iy,iy+d
             elif o2 == 0x4B: self.bcset(self.r24(self.imm24()))    # ld bc,(nn)
             elif o2 == 0x62: self._sbc16(self.hl)                  # sbc hl,hl
+            elif o2 == 0x5C:                                       # mlt de
+                self.de = ((self.de >> 8) & 0xFF) * (self.de & 0xFF)
             elif o2 == 0xB0:                                       # ldir
                 n = self.bc()
                 if n == 0: n = 0x1000000       # what the hardware really does
@@ -548,7 +560,7 @@ def load_hook(bin_path, xp_path):
 def run_hook(body, entry, a=1, b=0x05, cx=0x40, edit_open=True, org=0x100000,
              warm=False, parse_inp=False, virgin=False, app_running=False,
              text_flags=0x02, base_ok=True, base_delta=0, last_ans=b'', op1=b'',
-             mathprint=False, dec=False, deg=False, cmd=None):
+             mathprint=False, dec=False, deg=False, cmd=None, tail=0):
     """Runs one hook call -- the KEY call by default, ENTER on `entry`.
 
     `entry` goes where the OS leaves it flattened by A=2, the temp program #
@@ -556,7 +568,7 @@ def run_hook(body, entry, a=1, b=0x05, cx=0x40, edit_open=True, org=0x100000,
     sim; PENDING reads 0xFF if this ENTER was marked. Run evaluate() and then
     display() on it for the rest.
     """
-    s = Sim(body, org=org)
+    s = Sim(body, org=org, tail=tail)
     s.prog = ENTRY_AT - 2
     s.w8(ENTRY_AT - 2, len(entry) & 0xFF)
     s.w8(ENTRY_AT - 1, len(entry) >> 8)

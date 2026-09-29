@@ -20,7 +20,7 @@
 #include "vectors.h"
 
 uint8_t symce_engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
-                     const uint8_t *ans, uint8_t mode);
+                     const uint8_t *ans, uint8_t mode, const uint8_t *(*look)(uint8_t));
 
 static uint8_t work[0x4000];        /* engine.c asserts its pool fits in this */
 
@@ -57,7 +57,7 @@ int main(void)
         p += il;
         wl = *p++;
         for (q = lo; q < lo + PAINT - 256; q++) *q = 0xA5;
-        got = symce_engine(in, il, out, work, ans, mode);
+        got = symce_engine(in, il, out, work, ans, mode, 0);
         for (q = lo; q < lo + PAINT - 256 && *q == 0xA5; q++) ;
         if ((uint24_t)&mark - (uint24_t)q > REPORT->deep) {
             REPORT->deep = (uint24_t)&mark - (uint24_t)q;

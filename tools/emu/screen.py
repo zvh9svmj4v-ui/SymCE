@@ -66,6 +66,8 @@ def read(ranges, keys="", files=("arTIfiCE.8xp",), launch="A", asm=False,
             seq += ["delay|2000"]
         elif k[0] == "w" and k[1:].isdigit():
             seq += ["delay|" + k[1:]]            # w150: wait 150 ms
+        elif "|" in k:
+            seq += [k, "delay|%d" % per_key]         # hold|right, release|right: a raw step
         elif k == "dp":
             seq += ["key|.", "delay|%d" % per_key]   # the decimal point
         elif k == "L":

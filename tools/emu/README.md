@@ -8,7 +8,7 @@ first four.
     export AUTOTESTER_ROM=~/CEdev/ti84pce.rom      # gitignored, never committed
     python3 crash.py         # Y=, WINDOW, MODE, GRAPH, ERR, STAT, APPS: hook survives, still answers
     python3 e2e.py           # ACCEPTANCE: type on the real home screen, assert the answer
-    python3 lifecycle.py     # install, toggle from APPS, RAM clear, re-arm, re-install
+    python3 lifecycle.py     # install, settings screen from APPS (5 runs prgmSYMCE with no AsmHook2), RAM clear, re-arm, re-install
     python3 engine_device.py # the shipped engine.s on the real OS vs the host build
     python3 screen.py        # dump the home screen text after any key sequence
     python3 ramscan.py       # which fixed RAM does the OS leave alone

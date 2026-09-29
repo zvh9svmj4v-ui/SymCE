@@ -295,7 +295,7 @@ print("\n--- gates: anything but ENTER on the home screen is not ours ---")
 case("A=0 display",    "3258703258", a=0)
 case("A=2 eval",       "3258703258", a=2)
 case("A=3 ctx switch", "3258703258", a=3)
-case("not ENTER",      "3258703258", b=0x04)
+case("not ENTER",      "3258703258", b=0x0B)
 case("not home screen","3258703258", cx=0x0B)
 case("edit buf closed","3258703258", edit_open=False)
 # The home screen being the current context does not mean the buffer holds
@@ -388,7 +388,7 @@ def ins_key(name, key, runs, insert=True, **kw):
     sets insert again and swallows the key, giving every register back.
     Anywhere else, and for any other key, it leaves cxMain alone."""
     try:
-        s = Sim(BODY)
+        s = Sim(BODY, tail=kw.pop("tail", 0))
         s.w8(ez80sim.CX_CUR_APP, 0x40)
         top = kw.pop("top", 0xD1A8CA)
         s.w24(ez80sim.EDIT_TOP, top)
@@ -417,12 +417,14 @@ def ins_key(name, key, runs, insert=True, **kw):
         print("ok   %-24s %s" % (name, "run through cxMain, insert on" if runs else "passed on"))
 
 
-for k, n in [(0x09, "CLEAR"), (0x0A, "DEL"), (0x01, "RIGHT"), (0x02, "LEFT"), (0x03, "UP"),
+for k, n in [(0x09, "CLEAR"), (0x0A, "DEL"), (0x01, "RIGHT"), (0x02, "LEFT"), (0x03, "UP"), (0x04, "DOWN"),
              (0x0E, "2nd LEFT"), (0x0F, "2nd RIGHT")]:
     ins_key(n + " keeps insert", k, True)
-for k, n in [(0x04, "DOWN"), (0x05, "ENTER"), (0x0B, "INS"), (0x9A, "a letter")]:
+for k, n in [(0x05, "ENTER"), (0x0B, "INS"), (0x9A, "a letter")]:
     ins_key(n + " not wrapped", k, False)
 ins_key("CLEAR in a box", 0x09, False, insert=False, top=0xD1A90F)
+ins_key("DOWN in a box", 0x04, False, insert=False, top=0xD1A90F)
+ins_key("DOWN on a history line", 0x04, True, insert=False, cmd=0x12)
 
 
 def key_writes():
@@ -489,7 +491,7 @@ def menu(name, expect, b=K_ALPHA_DOWN, stolen=False, **kw):
 menu("ALPHA+DOWN on the entry", True)
 menu("... in MathPrint",        True, mathprint=True, text_flags=0x20)
 menu("... on a new line",       True, virgin=True)
-menu("plain DOWN",              False, b=0x04)
+menu("plain INS",               False, b=0x0B)
 menu("ALPHA+UP",                False, b=0x07)
 menu("cursor inside a box",     False, base_delta=0x45)
 menu("no baseline captured",    False, base_ok=False)
@@ -510,6 +512,12 @@ menu("0x24",                    False, b=0x24)
 menu("0x25",                    False, b=0x25)
 menu("0x21 not home",           False, b=0x21, cx=0x0B)
 menu("0x21 impostor hook",      False, b=0x21, stolen=True)
+
+# The second copy of the body (tail byte 1) is TI's own cursor: no insert mode,
+# no wrapped cursor keys, but the menu still opens.
+ins("TI cursor: a normal key", False, b=0x9A, tail=1)
+ins_key("TI cursor: LEFT passed on", 0x02, False, insert=False, tail=1)
+menu("TI cursor: ALPHA+DOWN", True, tail=1)
 
 
 def menu_regs():
@@ -718,6 +726,65 @@ codec("codec: three colours", [[W, W, W, K, W, 0xFF7F, W, W], [G, K, W, G, K, K,
 codec("codec: literals", [[W, R, K, B, G, R, 0x1234, W], [R] * 8, [W, W, W, W, B, W, R, W]])
 codec("codec: last literal fits", [[W, K, G, R, W, W, W, B]], lit=SAVE_END - 4)
 codec("codec: literal overflow", [[W, K, G, R, W, B, W, 0x1234]], lit=SAVE_END - 4, fits=False)
+
+print("\n--- the font hook and the localize hook (fhook.bin, lhook.bin) ---")
+sys.path.insert(0, os.path.join(ROOT, 'tools'))
+import mkfont
+LARGE, SMALL = mkfont.load()
+FSLOT, LSLOT, MAP_AT, REC_AT = 0xD025ED, 0xD02611, 0x120000, 0x121000
+
+
+def fontcase(name, binname, slot, a, b, code_ok, recs, rec_size, dest, width, hl_out):
+    """One call, entered as the OS does. The table is mkfont's own, put where
+    the two trailer words say. A hit: Z, HL = the record's address, 28/25 bytes
+    there equal the table, B kept. Anything else: NZ, every register as it came."""
+    body = load_hook(os.path.join(ROOT, 'symce/obj/hook/' + binname),
+                     os.path.join(ROOT, 'symce/bin/SYMCE1.8xv'))
+    s = Sim(body)
+    s.w24(s.org + len(body), MAP_AT)
+    s.w24(s.org + len(body) + 3, REC_AT - rec_size)
+    for c in range(256):
+        s.mem[MAP_AT + c] = mkfont.CODES.index(c) + 1 if c in recs else 0
+    for i, c in enumerate(mkfont.CODES):
+        for j, v in enumerate(recs[c]):
+            s.mem[REC_AT + i * rec_size + j] = v
+    s.w24(slot, s.org)
+    s.a, s.b, s.pc, s.ix, s.iy = a, b, s.org + 1, s.org + 1, ez80sim.IY_OS
+    s.hl, s.de, s.c = 0x123456, 0x654321, 0x33
+    s.w8(0xD005A4, 0x0C)               # as 0xA256F leaves it after the last glyph
+    s.writes = []
+    sp = s.sp
+    try:
+        s.run()
+    except Trap as ex:
+        return fail(name, ex)
+    if s.sp != sp or s.b != b:
+        return fail(name, "sp or B moved")
+    if code_ok:
+        got = bytes(s.r8(dest + i) for i in range(rec_size))
+        want = recs[b]
+        if not s.fz or s.hl != hl_out or got != want:
+            return fail(name, "hit wrong: Z=%s HL=%06X" % (s.fz, s.hl))
+        if width is not None and s.r8(0xD005A4) != width:
+            return fail(name, "width byte 0x%02X, want %02X" % (s.r8(0xD005A4), width))
+        print("ok   %-24s Z, HL=%06X, record == table" % (name, s.hl))
+    else:
+        if s.fz or (s.hl, s.de, s.c) != (0x123456, 0x654321, 0x33) or s.writes:
+            return fail(name, "miss must be NZ, regs kept, no writes")
+        print("ok   %-24s NZ, regs kept" % name)
+
+
+for nm, code in [("A", 0x41), ("theta 0x5B", 0x5B), ("pi 0xC4", 0xC4), ("0x21 !", 0x21)]:
+    fontcase("font hit " + nm, 'fhook.bin', FSLOT, 1, code, True, LARGE, 28, 0xD005A5, 0, 0xD005A1)      # width byte 0: the OS draws it as a row
+for nm, code in [("0x20 space", 0x20), ("0x01", 0x01), ("0xFF", 0xFF)]:
+    fontcase("font miss " + nm, 'fhook.bin', FSLOT, 1, code, False, LARGE, 28, 0, 0, 0)
+fontcase("font A=2 (TRACE width)", 'fhook.bin', FSLOT, 2, 0x41, False, LARGE, 28, 0, 0, 0)
+for nm, code in [("A", 0x41), ("W", 0x57), ("not-equal 0x18", 0x18)]:
+    fontcase("loc hit " + nm, 'lhook.bin', LSLOT, 0x75, code, True, SMALL, 25, 0xD005C5, None, 0xD005C5)
+for nm, code in [("0x20 space", 0x20), ("0xFF", 0xFF)]:
+    fontcase("loc miss " + nm, 'lhook.bin', LSLOT, 0x75, code, False, SMALL, 25, 0, 0, 0)
+for a in (0x76, 0x77, 0x00, 0x01, 0x74):
+    fontcase("loc A=%02X" % a, 'lhook.bin', LSLOT, a, 0x41, False, SMALL, 25, 0, 0, 0)
 
 print()
 if fails:

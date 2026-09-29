@@ -270,10 +270,30 @@ def main():
     print("%-6s /X     -> %-6s %s" % ("X=0", show(got[1]) if len(got) > 1 else "<missing>",
           "ok  dividing by X while X is 0; 1/0 still errors" if good else "FAIL %r" % got))
 
+    # SOLVE fills in the stored values of the letters it does not solve for
+    # (engine look(), the hook's .Llook: ChkFindSym on the real variable), and
+    # changes none of them: SOLVE(Y=X,Y) afterwards still gives the 5. DelVar X
+    # takes X out of the VAT (measured), so the letter is a letter again. The
+    # CATALOG (2nd 0) jumps with D, and DelVar is the fifth entry after dayOfWk(.
+    solve = "alpha down 1 xton + 2 alpha 1 2nd math 1 3 , alpha 1 )"
+    got = [t for t, _ in run("5 sto xton enter . %s enter . alpha down 1 alpha 1 2nd math 1 xton , alpha 1 ) enter ."
+                             % solve)[1:]]
+    good = got[-4:] == [b"SOLVE(X+2Y=3,Y)", b"Y=" + NEG + b"1", b"SOLVE(Y=X,Y)", b"Y=5"]
+    ok &= good
+    print("%-6s stored -> %-6s %s" % ("5->X", show(got[-3]) if len(got) > 3 else "<missing>",
+          "ok  SOLVE(X+2Y=3,Y) is Y=-1 and X still holds 5" if good else "FAIL %r" % got))
+    got = [t for t, _ in run("5 sto xton enter . 2nd 0 . -1 . down down down down down enter . xton enter . . %s enter ." % solve)[1:]]
+    good = got[-2:] == [b"SOLVE(X+2Y=3,Y)", b"Y=(3-X)/2"]
+    ok &= good
+    print("%-6s DelVar -> %-6s %s" % ("X", show(got[-1]) if got else "<missing>",
+          "ok  no value stored: X stays a letter" if good else "FAIL %r" % got))
+
     # A command SymCE cannot finish is its own ERR screen, 1:Quit only, the
     # message in appErr1; Quit goes home and the next entry answers as ever.
     for keys, msg in (("alpha down 1 xton ^ 2 + 1 2nd math 1 0 , xton )", b"NO SOLUTION\0\0"),
                       ("alpha down 1 xton ^ 2 - 4 )", b"SYNTAX\0SOLVE(A=B,X)\0\0"),
+                      # 1/3 is stored as 0.33333333333333: over 6 digits
+                      ("1 / 3 sto xton enter . " + solve, b"SYMCE LIMIT\0SOLVE\0"),
                       (spell("POLYGCD") + " xton )", b"ARGUMENT\0POLYGCD\0\0"),
                       # a list as Ans: SymCE cannot, and the OS's Ans is stale
                       (spell("POLYROOTS") + " xton ^ 2 - 4 ) enter . * 3", b"SYMCE LIMIT\0ANS\0\0"),
@@ -304,7 +324,8 @@ def main():
     # the OS, which then drew the block (overwrite) cursor until the next key;
     # the hook runs them through cxMain and sets it back (textFlags bit 4).
     for mode, pro in (("cl", PROLOGUE), ("mp", PROLOGUE.replace("C ", "", 1))):
-        for keys in ("xton xton left", "2 xton clear", "clear", "xton xton 2nd left", "xton xton left del"):
+        for keys in ("xton xton left", "2 xton clear", "clear", "xton xton 2nd left", "xton xton left del",
+                     "xton xton left down", "xton xton down"):
             for settle in (1500, 1900, 2300):
                 r = screen.read([("tf", 0xD00085, 1)], keys=pro + keys + " .",
                                 files=FILES, launch=LAUNCH, lead=False, settle=settle)
@@ -377,8 +398,124 @@ def main():
               else "FAIL type %s text %s last %s" % (r["type"].hex(), r["text"].hex(), r["last"].hex())))
 
     ok &= menu()
+    ok &= fonts()
     print("\nALL PASS" if ok else "\nFAILURES ABOVE")
     return 0 if ok else 1
+
+
+# ---- the Evo font: the table's glyphs, pixel for pixel, in VRAM -------------------
+SYMCE_APP = "apps " + "down " * 16 + "enter . . "          # APPS > SymCE: the settings screen
+
+
+def font_glyphs():
+    """(mkfont's large table, small table, the ROM's own glyphs) as {code: rows}."""
+    sys.path.insert(0, os.path.join(screen.HERE, "..", ".."))
+    sys.path.insert(0, os.path.join(screen.HERE, ".."))
+    import mkfont
+    rom = open(screen.ROM, "rb").read()
+    lg, sm = mkfont.load()
+    rl = lambda c: mkfont.unpack_large(rom[0x3D6E + c * 28:0x3D6E + c * 28 + 28])
+    rs = lambda c: mkfont.unpack_small(rom[0xA3CA9 + c * 25:0xA3CA9 + c * 25 + 25])
+    return ({c: mkfont.unpack_large(v) for c, v in lg.items()}, {c: mkfont.unpack_small(v) for c, v in sm.items()},
+            rl, rs)
+
+
+def find(dark, rows, ys):
+    """Is `rows` (strings of . and #) drawn, exactly, anywhere with its top in ys?"""
+    h, w = len(rows), len(rows[0])
+    ink = [(x, y) for y, r in enumerate(rows) for x, ch in enumerate(r) if ch == "#"]
+    for y0 in ys:
+        for x0 in range(0, 320 - w + 1):
+            if all((x0 + x, y0 + y) in dark for x, y in ink) and all(
+                    ((x0 + x, y0 + y) in dark) == (ch == "#") for y, r in enumerate(rows)
+                    for x, ch in enumerate(r)):
+                return (x0, y0)
+    return None
+
+
+def fonts():
+    """Evo on after the installer: the home screen's large '2' and the status bar's small O
+    are the table's, not the ROM's. APPS > SymCE > 3 puts the ROM's back; CAS off (1) leaves Evo alone."""
+    import vram
+    lg, sm, rl, rs = font_glyphs()
+    typed = "2 xton + 2 xton enter . ."
+    N, TWO = 0x4F, 0x32                     # "O": N is the ROM N shifted one pixel, not telling
+    ok = True
+
+    def look(name, keys, want_large, want_small):
+        nonlocal ok
+        for settle in (1500, 1900, 2300):
+            px, r = vram.grab(PROLOGUE.replace("C ", "", 1) + keys, 0, 240, files=FILES, launch=LAUNCH,
+                              lead=False, settle=settle, extra=[("txt", screen.TEXTSHADOW, 260)])
+            dark = {xy for xy, v in px.items() if vram.dark(v)}
+            two = [find(dark, g, range(20, 120)) for g in (lg[TWO], rl(TWO))]
+            light = {xy for xy in px if xy not in dark}          # the status bar is white on dark
+            nn = [find(light, g[:12], range(0, 1)) for g in (sm[N], rs(N))]
+            if two[0] or two[1]:
+                break
+        got = (bool(two[0]), bool(two[1]), bool(nn[0]), bool(nn[1]))
+        want = (want_large, not want_large, want_small, not want_small)
+        # Right after the installer the status bar is still the one drawn before the hooks
+        # were armed (it redraws on the next mode change): only the large font is asserted.
+        good = got == want if want_small is not None else got[:2] == want[:2]
+        ok &= good
+        print("%-6s font   -> %-12s %s" % ("Evo", name, "ok  large 2 and small O " + ("Evo" if want_large else "ROM") + ("" if want_small is not None else " (small: not asserted)")
+              if good else "FAIL evo/rom large %s small %s" % (got[:2], got[2:])))
+        return r["txt"]
+
+    def cell(name, keys):
+        """The row above and the row below a replaced glyph's 12x14 cell, and the columns just
+        outside it, are background. (Measured 2026-09-28: the width byte 0x0C left in 0xD005A4
+        was drawn as a 2-px tick one row over EVERY glyph.)"""
+        nonlocal ok
+        for settle in (1500, 1900, 2300):
+            px, _ = vram.grab(PROLOGUE.replace("C ", "", 1) + keys, 0, 240, files=FILES, launch=LAUNCH,
+                              lead=False, settle=settle)
+            dark = {xy for xy, v in px.items() if vram.dark(v)}
+            at = find(dark, lg[TWO], range(20, 200))
+            if at:
+                break
+        x0, y0 = at or (0, 0)
+        bad = sorted((x, y) for y in (y0 - 1, y0 + 14) for x in range(x0 - 2, x0 + 14) if (x, y) in dark)
+        ok &= bool(at) and not bad
+        print("%-6s font   -> %-12s %s" % ("Evo", name, ("ok  no ink around the cell at %s" % (at,)) if at and not bad
+                                        else "FAIL cell %s stray %s" % (at, bad)))
+
+    def star_err():
+        """'*' typed on the home screen is the redrawn 6x6 asterisk; the ERROR screen's help text
+        (small font) has clean rows 118/138/158/178 above each line (Measured 2026-09-28: the
+        same 0x0C tick, seen as 2-px marks at x = 11-12, 23-24, ...)."""
+        nonlocal ok
+        for settle in (1500, 1900, 2300):
+            px, _ = vram.grab(PROLOGUE.replace("C ", "", 1) + "2 * 3 . .", 0, 240, files=FILES, launch=LAUNCH,
+                              lead=False, settle=settle)
+            dark = {xy for xy, v in px.items() if vram.dark(v)}
+            at = find(dark, lg[0x2A], range(20, 200))
+            if at:
+                break
+        ok &= bool(at)
+        print("%-6s font   -> %-12s %s" % ("Evo", "star, 2*3", "ok  '*' glyph at %s" % (at,) if at else "FAIL no '*' glyph"))
+        for settle in (1500, 1900, 2300):
+            px, _ = vram.grab(PROLOGUE.replace("C ", "", 1) + "2 + enter . .", 0, 240, files=FILES, launch=LAUNCH,
+                              lead=False, settle=settle)
+            dark = {xy for xy, v in px.items() if vram.dark(v)}
+            if any((x, y) in dark for x in range(320) for y in (120, 121, 122)):
+                break
+        bad = sorted((x, y) for y in (118, 138, 158, 178) for x in range(320) if (x, y) in dark)
+        text = sum(1 for y in range(120, 132) for x in range(320) if (x, y) in dark)
+        ok &= not bad and text > 50
+        print("%-6s font   -> %-12s %s" % ("Evo", "error rows", "ok  rows 118/138/158/178 clean, help text drawn"
+                                        if not bad and text > 50 else "FAIL stray %s, text px %d" % (bad[:8], text)))
+
+    look("installed", typed, True, None)
+    cell("cell, home", typed)
+    cell("cell, menu", "math . .")
+    star_err()
+    look("on, app opened and closed", SYMCE_APP + "clear . " + typed, True, True)
+    look("3: TI", SYMCE_APP + "3 . clear . " + typed, False, False)
+    look("3 twice: Evo", SYMCE_APP + "3 . 3 . clear . " + typed, True, True)
+    look("1: CAS off, Evo stays", SYMCE_APP + "1 . clear . " + typed, True, True)
+    return ok
 
 
 def mathprint(keys, vram=False):
