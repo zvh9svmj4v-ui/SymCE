@@ -178,7 +178,7 @@ def run(keys, files=FILES):
         r = screen.read([("hookptr", 0xD025E1, 3), ("flag", 0xD000B4, 1), ("errNo", 0xD008DF, 1),
                          ("screen", screen.TEXTSHADOW, screen.COLS * screen.ROWS)],
                         keys=PROLOGUE + keys, files=files, launch=LAUNCH, lead=False,
-                        settle=settle)
+                        settle=settle, per_key=300)
         if b"\xff" * 4 not in r["screen"]:
             break
     ptr = int.from_bytes(r["hookptr"], "little")
@@ -303,7 +303,7 @@ def main():
         for settle in (1500, 1900, 2300):
             r = screen.read([("errNo", 0xD008DF, 1), ("msg", 0xD025A9, 26), ("cx", 0xD007E0, 1)],
                             keys=PROLOGUE + keys + " enter . .",
-                            files=FILES, launch=LAUNCH, lead=False, settle=settle)
+                            files=FILES, launch=LAUNCH, lead=False, settle=settle, per_key=300)
             if b"\xff" * 4 not in r["msg"]:
                 break
         got = [t for t, _ in run(keys + " enter . . 1 . 2 xton + 2 xton enter .")[1:]]
@@ -328,7 +328,7 @@ def main():
                      "xton xton left down", "xton xton down"):
             for settle in (1500, 1900, 2300):
                 r = screen.read([("tf", 0xD00085, 1)], keys=pro + keys + " .",
-                                files=FILES, launch=LAUNCH, lead=False, settle=settle)
+                                files=FILES, launch=LAUNCH, lead=False, settle=settle, per_key=300)
                 if r["tf"] != b"\xff":
                     break
             good = bool(r["tf"][0] & 0x10)
@@ -388,7 +388,7 @@ def main():
                              ("last", 0xD0EE20, len(bytes.fromhex(last)))],
                             keys=PROLOGUE.replace("C ", "", 1)
                             + keys + " enter . . up enter . + 1 enter . .",
-                            files=FILES, launch=LAUNCH, lead=False, settle=settle)
+                            files=FILES, launch=LAUNCH, lead=False, settle=settle, per_key=300)
             if b"\xff" * 4 not in r["text"] + r["last"]:
                 break
         good = (r["type"] == b"\x18" and r["text"] == bytes.fromhex(text)
@@ -470,7 +470,7 @@ def fonts():
         nonlocal ok
         for settle in (1500, 1900, 2300):
             px, _ = vram.grab(PROLOGUE.replace("C ", "", 1) + keys, 0, 240, files=FILES, launch=LAUNCH,
-                              lead=False, settle=settle)
+                              lead=False, settle=settle, per_key=300)
             dark = {xy for xy, v in px.items() if vram.dark(v)}
             at = find(dark, lg[TWO], range(20, 200))
             if at:
@@ -488,7 +488,7 @@ def fonts():
         nonlocal ok
         for settle in (1500, 1900, 2300):
             px, _ = vram.grab(PROLOGUE.replace("C ", "", 1) + "2 * 3 . .", 0, 240, files=FILES, launch=LAUNCH,
-                              lead=False, settle=settle)
+                              lead=False, settle=settle, per_key=300)
             dark = {xy for xy, v in px.items() if vram.dark(v)}
             at = find(dark, lg[0x2A], range(20, 200))
             if at:
@@ -497,7 +497,7 @@ def fonts():
         print("%-6s font   -> %-12s %s" % ("Evo", "star, 2*3", "ok  '*' glyph at %s" % (at,) if at else "FAIL no '*' glyph"))
         for settle in (1500, 1900, 2300):
             px, _ = vram.grab(PROLOGUE.replace("C ", "", 1) + "2 + enter . .", 0, 240, files=FILES, launch=LAUNCH,
-                              lead=False, settle=settle)
+                              lead=False, settle=settle, per_key=300)
             dark = {xy for xy, v in px.items() if vram.dark(v)}
             if any((x, y) in dark for x in range(320) for y in (120, 121, 122)):
                 break
@@ -518,7 +518,7 @@ def fonts():
     return ok
 
 
-def mathprint(keys, vram=False):
+def mathprint(keys, vram=False, classic=False):
     """MathPrint, after the keys: the entry's bytes before and after the cursor,
     and with vram, the screen as 16-row band CRCs. The entry is read out of
     the edit buffer's two halves, editTop..editCursor and editTail..editBtm;
@@ -528,8 +528,8 @@ def mathprint(keys, vram=False):
     for settle in (1500, 1900, 2300):
         r = screen.read([("edit", 0xD02437, 12), ("lo", lo, 256), ("hi", hi, 128),
                          ("cx", 0xD007E0, 1), ("errNo", 0xD008DF, 1)],
-                        keys=PROLOGUE.replace("C ", "", 1) + keys, files=FILES, launch=LAUNCH,
-                        lead=False, settle=settle, crcs=bands)
+                        keys=(PROLOGUE if classic else PROLOGUE.replace("C ", "", 1)) + keys, files=FILES,
+                        launch=LAUNCH, lead=False, settle=settle, crcs=bands)
         if b"\xff" * 4 not in r["edit"] and None not in [r[n] for n, _, _ in bands]:
             break
     top, cur, tail, btm = (int.from_bytes(r["edit"][i:i + 3], "little") for i in (0, 3, 6, 9))
@@ -623,6 +623,18 @@ def menu():
                         vram=True)
     ok &= report("MthPrt", picked == by_hand and picked[2][-2:] == [0x40, 0],
                  "tab in a box: the same screen as FACTOR( by hand", picked[0])
+    # The popup's text must not outlive it: VPutS records glyphs in the OS's
+    # pixel shadows, which the next full-screen redraw of home (2nd MATH
+    # closed or picked from, MODE) replays over the entry. With the popup
+    # opened and closed first, the screen after each is exactly the screen
+    # without it, in both modes.
+    for classic in (False, True):
+        mode = "Classic" if classic else "MthPrt"
+        for after in ("2nd math 1", "2nd math clear", "mode clear"):
+            never = mathprint("7 8 left " + after, vram=True, classic=classic)
+            seen = mathprint("7 8 left alpha down clear " + after, vram=True, classic=classic)
+            ok &= report(mode, seen == never,
+                         "popup closed, then %s: screen as without it" % after, seen[0])
     # And a submenu's pick there: Trigonometry's tCollect(, T C O L L E C T (.
     picked = mathprint("2 xton ^ 2nd math left left left 8 2" + tail, vram=True)
     by_hand = mathprint("2 xton ^ alpha 4 alpha prgm alpha 7 alpha ) alpha ) alpha sin alpha prgm alpha 4 (" + tail,

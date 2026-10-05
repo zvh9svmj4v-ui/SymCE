@@ -52,6 +52,7 @@ obj/font.inc: font/large.txt font/small.txt ../tools/mkfont.py
 # powf) is ordinary C plus CEdev's runtime helpers (__ldivs and friends), each linked
 # on its own at three bases: the first two differ exactly at its absolute
 # addresses, which relocs.py turns into app relocations; the third checks them.
+obj/graph.inc: src/graph_stat.c src/graph_draw.c src/graph_draw.h
 obj/%.inc: src/%.c src/engine.ld ../tools/relocs.py
 	@mkdir -p obj/$*
 	$(CLANG) $< -o obj/$*/$*.s
@@ -74,7 +75,7 @@ bin/host/minipoly_cli: ../tools/minipoly_cli.c ../tools/minipoly.c
 	cc -O2 -o $@ $^
 
 # The grapher's compiler and evaluator, for graph_check.py.
-bin/host/graph_cli: src/graph.c ../tools/graph_cli.c
+bin/host/graph_cli: src/graph.c src/graph_stat.c ../tools/graph_cli.c
 	@mkdir -p $(@D)
 	cc -O2 -o $@ ../tools/graph_cli.c -lm
 

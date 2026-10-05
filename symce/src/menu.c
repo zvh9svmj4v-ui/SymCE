@@ -71,6 +71,9 @@
 #define DRAWBG   (*(volatile uint16_t *)0xD026AA)
 #define KEYEXT   (*(volatile uint8_t *)0xD0058E)        /* keyExtend */
 
+#define PSHADOW1 ((volatile uint8_t *)0xD031F6)         /* pixelShadow: glyph bits of VPutS, 40 bytes a row */
+#define PSHADOW2 ((volatile uint8_t *)0xD07396)
+
 #define BLACK    0x0000
 #define WHITE    0xFFFF
 #define GREY     0xE71C          /* the OS's popup grey, e0e0e0 (measured) */
@@ -193,6 +196,7 @@ static uint8_t sub(const char *s)               /* the menu item s opens, or 0 *
 void fill_px(volatile uint16_t *p, unsigned bytes, unsigned h, uint16_t c);
 int save_px(volatile uint16_t *p, unsigned skip, unsigned w4, unsigned h, uint16_t *lit);
 void restore_px(volatile uint16_t *p, unsigned skip, unsigned w4, unsigned h, uint16_t *lit);
+void sync_px(volatile uint16_t *p, volatile uint8_t *s1, volatile uint8_t *s2, unsigned rows);
 
 static void fill(unsigned x, unsigned y, unsigned w, unsigned h, uint16_t c)
 {
@@ -324,6 +328,13 @@ static const char *popup(uint8_t m)
         } else
             break;
     }
+    /* VPutS also records its glyphs in the OS's 1-bit pixel shadows (bit x of
+       row y-30 is set where pixel (x, y) is not white: *measured*, exact on
+       the home screen), and a later full-screen redraw of home (a menu,
+       MODE ...) replays them: the popup's text would come back over it. The
+       screen under the popup is back, so rebuild its bits from that (whole rows,
+       in asm: C took longer than the keys that follow wait). */
+    sync_px(VRAM + (240 - h) * 320, PSHADOW1 + (240 - h - 30) * 40, PSHADOW2 + (240 - h - 30) * 40, h);
     DRAWFG = fg;
     DRAWBG = bg;
     FONTFL = font;
@@ -735,4 +746,40 @@ __asm__(
 "	pop	de\n"
 "	pop	hl\n"
 "	jr	.Lrnext\n"
+"	.section	.text._sync_px,\"ax\",@progbits\n"
+"	.globl	_sync_px\n"
+"_sync_px:\n"                    /* (p, s1, s2, rows): the shadows' bits = pixels not white */
+"	push	iy\n"
+"	push	ix\n"
+"	ld	ix, 0\n"
+"	add	ix, sp\n"
+"	ld	hl, (ix + 9)\n"
+"	ld	de, (ix + 12)\n"
+"	ld	iy, (ix + 15)\n"
+"	ld	c, (ix + 18)\n"
+"	push	de\n"
+"	pop	ix\n"
+".Lyrow:\n"
+"	ld	b, 40\n"
+".Lybyte:\n"
+"	ld	d, 0\n"
+"	.rept	8\n"
+"	ld	a, (hl)\n"
+"	inc	hl\n"
+"	and	a, (hl)\n"
+"	inc	hl\n"
+"	inc	a\n"                    /* 0 for white (FFFF) */
+"	add	a, 0xFF\n"             /* carry unless 0 */
+"	rl	d\n"
+"	.endr\n"
+"	ld	(ix + 0), d\n"
+"	ld	(iy + 0), d\n"
+"	inc	ix\n"
+"	inc	iy\n"
+"	djnz	.Lybyte\n"
+"	dec	c\n"
+"	jr	nz, .Lyrow\n"
+"	pop	ix\n"
+"	pop	iy\n"
+"	ret\n"
 );

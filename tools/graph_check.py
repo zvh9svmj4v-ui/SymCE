@@ -21,7 +21,10 @@ TOK = {'+': [0x70], '-': [0x71], '*': [0x82], '/': [0x83], '^': [0xF0], '~': [0x
        'EE': [0x3B], 'pi': [0xAC], 'e': [0xBB, 0x31], 'n/d': [0xEF, 0x2E], 'theta': [0x5B],
        'sqrt(': [0xBC], 'abs(': [0xB2], 'ln(': [0xBE], 'e^(': [0xBF], 'log(': [0xC0],
        '10^(': [0xC1], 'sin(': [0xC2], 'asin(': [0xC3], 'cos(': [0xC4], 'acos(': [0xC5],
-       'tan(': [0xC6], 'atan(': [0xC7]}
+       'tan(': [0xC6], 'atan(': [0xC7],
+       '=': [0x6A], '<': [0x6B], '>': [0x6C], '<=': [0x6D], '>=': [0x6E], '!=': [0x6F],
+       'and': [0x40], 'or': [0x3C], 'xor': [0x3D], 'not(': [0xB8], 'int(': [0xB1],
+       'iPart(': [0xB9], 'fPart(': [0xBA]}
 
 
 def toks(s):
@@ -57,7 +60,28 @@ class CLI_:
 
 
 D = math.pi / 180
+B = float
 CASES = [   # name, tokens, f(x, v)
+    ("X>2", "X > 2", lambda x, v: B(x > 2)),
+    ("X<=1", "X <= 1", lambda x, v: B(x <= 1)),
+    ("X>=1", "X >= 1", lambda x, v: B(x >= 1)),
+    ("X<1", "X < 1", lambda x, v: B(x < 1)),
+    ("X=X", "X = X", lambda x, v: 1.0),
+    ("X!=X", "X != X", lambda x, v: 0.0),
+    ("1+1=2 (arith binds tighter)", "1 + 1 = 2", lambda x, v: 1.0),
+    ("2<3=1 left to right", "2 < 3 = 1", lambda x, v: 1.0),
+    ("X>0 and X<2", "( X > 0 ) and ( X < 2 )", lambda x, v: B(0 < x < 2)),
+    ("X>0 and X<2 no parens", "X > 0 and X < 2", lambda x, v: B(0 < x < 2)),
+    ("X<0 or X>2", "X < 0 or X > 2", lambda x, v: B(x < 0 or x > 2)),
+    ("or under and", "1 or 0 and 0", lambda x, v: 1.0),
+    ("and under or", "0 and 0 or 1", lambda x, v: 1.0),
+    ("xor", "X < 0 xor X < 1", lambda x, v: B((x < 0) != (x < 1))),
+    ("not(", "not( X > 0 )", lambda x, v: B(not x > 0)),
+    ("int(", "int( X )", lambda x, v: B(math.floor(x))),
+    ("iPart(", "iPart( X )", lambda x, v: B(math.trunc(x))),
+    ("fPart(", "fPart( X )", lambda x, v: x - math.trunc(x)),
+    ("piecewise", "( X < 0 ) ( ~ X ) + ( X >= 0 ) ( X sq )", lambda x, v: -x if x < 0 else x * x),
+    ("piecewise 2X", "2 ( X > 1 ) + 3 ( X <= 1 )", lambda x, v: 2.0 if x > 1 else 3.0),
     ("X", "X", lambda x, v: x),
     ("2+3*X", "2 + 3 * X", lambda x, v: 2 + 3 * x),
     ("2X (implied)", "2 X", lambda x, v: 2 * x),
@@ -132,10 +156,10 @@ DEG = [   # Degree mode
 BAD = [   # tokens, the code graph.c must answer, and the token it names ("" = not checked)
     ("Y1 reference", [0x5E, 0x10], 1, 0x5E),
     ("Ans", toks("2") + [0x72], 1, 0x72),
-    ("X>2", toks("X") + [0x6F, 0x32], 1, 0x6F),
+    ("list {", [0x08, 0x58], 1, 0x08),
     ("sinh(", [0xC8, 0x58, 0x11], 1, 0xC8),
     ("cube root", [0xBD, 0x58, 0x11], 1, 0xBD),
-    ("int(", [0xB1, 0x58, 0x11], 1, 0xB1),
+    ("fnInt(", [0xA4, 0x58, 0x11], 1, 0xA4),
     ("XY (BB xx)", [0xBB, 0x99], 1, 0xBB),
     ("stray )", toks("X )"), 3, 0x11),
     ("dangling +", toks("2 +"), 3, 0),

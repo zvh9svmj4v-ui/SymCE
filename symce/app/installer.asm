@@ -91,9 +91,14 @@ installApp:
     add hl, de
     call ti.SetFontHook
     pop hl
+    push hl
     ld de, lhook_rel
     add hl, de
     call ti.SetLocalizeHook
+    pop hl
+    ld de, khook_rel
+    add hl, de
+    call ti.SetGetKeyHook               ; arms the RAW KEY hook (0xD025DB) despite its name
     ; v15 and earlier kept the body in these appvars; nothing reads them now.
     ld hl, oldHookVar
     call delVar

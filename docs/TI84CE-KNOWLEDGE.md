@@ -272,7 +272,35 @@ routines call it with A = `0x75` (`Load_Sfont` `0xA55D3`: small GLYPH, `B` =
 char, `HL` = char*25) and `0x77` (small width). **`Load_Sfont` never calls the
 font hook.** Z from the localize hook = "done". The localize hook also sees the
 OS's own translation calls (A = `00`, `1A..1C`, `B0..B9`, `D9`, `E3`, `E7`,
-`E9`, `EC`, `F2` seen): return NZ for anything but `75..77`.
+`E9`, `EC`, `F2` seen): return NZ for anything but `75..77` and `0x0A`, and see
+"Localize events whose call site ignores Z" below.
+
+**Localize events whose call site ignores Z (*measured* 2026-10-05, 5.8.4; found
+by logging A and the caller's return address in the hook).** The wrapper is
+transparent (A, F, HL, DE, BC reach the caller as the hook left them), so a
+site that does not test Z uses whatever the hook returns. The no-hook result is
+what the hook must give for such an event:
+- **A=0x0A, site `0x7BB8B`** (menu-name fetch, `jr` on without a Z test): uses HL
+  and then `dec hl`. No hook: HL = (HL). NZ with HL untouched left every row on
+  the same pointer, so 2nd CALC drew `3-root(` for all 7 rows with the Evo font
+  on (CALC from the grapher, TI's graph and Y=). The hook now does `ld hl,(hl)`
+  for 0x0A (d033a8c). The neighbour, A=9 at `0x7BB5C`, does test Z.
+- **A=0x49, 0x4A, 0x4B, sites `0x80D8C`, `0x80E3B`, `0x81037`**: store the A the
+  call returns to curCol (`0xD00596`) with no Z test. No-hook values 0x0A, 0x0D,
+  0x0C. Our hook leaves A = the event number. Never seen firing on any screen
+  logged with Evo on (Y=, WINDOW, MODE, TABLE, STAT and edit, 1-Var Stats, APPS,
+  FORMAT, ZOOM, CATALOG, MEM, LIST, DRAW, VARS, MATH, program editor, error,
+  matrix), so left alone.
+- **A=0x4C, site `0x819B0`**: `jr`s over its default code (curCol = 0x0A, then a
+  text routine) whenever any localize hook is armed; no return value restores
+  the default. Also never seen firing.
+- **A=0xE1** (token names; sites `0x882C4`, `0x882EE`, `0x8833F`, `0x88393`,
+  `0x883A9`) does `ret z` after the call, so NZ is correct and the default runs.
+- The `call nz,wrapper` sites (e.g. `0x6B52B`, `0x7BB0B`) follow the hook-off bit
+  test, so the hook-off state is Z there; none was observed to matter.
+Rule: any localize event whose site ignores Z must get its no-hook result from
+the hook. Evo off clears the localize hook (fontClr), so none of this applies
+then. Regression: `tools/emu/graph.py menus` (2nd CALC rows must differ).
 
 **Wrapper (`0x23A1C`, *measured* from disassembly).** Saves IX/AF/HL, loads
 the slot, reads its first byte, `cp 0x83`. Mismatch: it does `res 5,(iy+53)`
@@ -361,6 +389,51 @@ advance (12, forced by `0xA256F`); the small font's advance is its width byte.
 calls: leave every A but `0x75..0x77` to the OS (return NZ). (7) SymCE
 takes the localize hook over while the Evo font is on (TI's language apps use
 it); the settings screen turns the font on and off with key 3, and CAS off (key 1) only clears the hooks that still point into SymCE.
+
+### Raw key hook: taking over a key (measured 2026-09-30, 5.8.4)
+
+SymCE uses it to send the GRAPH key to its own grapher (`symce_khook` in
+`symce/app/main.asm`).
+
+- Slot `rawKeyHookPtr 0xD025DB`, enable bit `hookflags2` (iy+0x34) bit 5.
+- **Misnomer:** the include's `ti.SetGetKeyHook` (0x213CC -> 0x23B55) arms
+  THIS slot, not getKey (0xD025DE). `ti.ClrRawKeyHook` is 0x213D8.
+- Call site: the monitor loop only (`0x8C482 bit 5,(iy+52)` / `0x8C488 call
+  0x2392F`). It runs once per key, with A = the key, after `RunIndicOn` and
+  *before* the monitor dispatches context keys (kGraph 0x44, kYequ, ...). The
+  dispatcher 0x2392F checks the 0x83 byte (0x257C1) and calls the body
+  (0x257CB). It bumps the depth counter `0xD0265B` around the call.
+- Return A = the key the OS should process. `ret nz` with A unchanged passes
+  it through.
+- The body may simply not return. SymCE runs a whole full-screen program from
+  it, then `jp ti.JForceCmdNoChar`:
+  - `JForceCmdNoChar 0x8C6E1` (`xor a`, then `JForceCmd 0x8C6E2`) reloads SP
+    from `0xD007FA` (the monitor's own), so the abandoned hook frame doesn't
+    matter.
+  - It re-enters home at 0x8C5BA, which never calls the raw key hook.
+  - The counter `0xD0265B` left at 1 is zeroed by home init (0x5830D).
+- Leaving another context first: `ld a,kQuit` / `call ti.NewContext0`
+  (0x8C85E) runs the current screen's putaway, so Y= files an equation still
+  being edited. NewContext0 from home to home re-inits home. Switching to the
+  context you are already in (not home) does nothing.
+- `cxCurApp 0xD007E0` tells you where the key came from:
+  - 0x40 home, 0x44 graph, 0x50 PrgmInput, 0x52 Error, >= 0x58 flash apps.
+  - Leave GRAPH to the OS on ERR (TI ignores it there), on a program's Input,
+    and in flash apps.
+- **Busy dots.** The monitor calls `RunIndicOn 0xA298C` at 0x8C459, before the
+  hook. It sets indicFlags `0xD00092` bit 0 (`indicRun`, set only at 0xA29A9).
+  The timer ISR 0x3D0DC -> 0x3D25B -> 0xA34A8 then draws the dots at x 293-300,
+  y 0-12 over whatever a non-returning hook draws.
+  - `RunIndicOff 0xA3649` returns early without clearing when apdFlags2
+    (`0xD0009B`) bit 6 is set.
+  - What works: `res indicRun,(iy+indicFlags)` before drawing. Pixel diff of
+    the top rows went from 16 rows to 0.
+- The raw key hook survives the 5.8.x validator only because the body is in
+  the flash app (see Rules).
+- A RAM clear disarms it, like every hook.
+- One slot: arming it replaces any other app's raw key hook.
+- Build trap hit while measuring this: `make PAD=132000` writes to
+  `bin/pad132000/`, so copying `bin/SYMCE*` afterwards tests a stale build.
 
 ### SymCE's hook (`symce/src/hook.c`)
 
@@ -621,6 +694,17 @@ popup does not open. `tools/hook_sim_test.py` runs the shipped codec
 calls CursorOff before handing the key to `cxMain`, so no cursor pixels are
 saved. The OS popup look: 2 px black border, grey `e0e0e0` (`0xE71C`),
 highlight `181c18` (`0x18E3`) behind `N:`, tabs at y 220..239.
+
+**Pixel shadows** (*measured* 2026-10-05). `_VPutS`/PutMap also record every glyph they draw in two identical
+1-bit bitmaps, `0xD031F6` and `0xD07396` (8400 bytes each): 40 bytes a row, row = y - 30, bit 7 = leftmost, set where
+the pixel is not white (exact on the home screen). A later full-screen redraw of home (a closed menu, MODE) replays
+them, so text SymCE draws over home with VPutS and then wipes by putting the saved pixels back comes back on the
+next such redraw (bug: the ALPHA+DOWN popup's text stayed after 2nd MATH). `menu.c` `sync_px` rebuilds the bits of the
+popup's rows from VRAM when it closes.
+The grapher's text does it too (*measured*): the X= box (large font) and the bar under a CALC result are recorded
+in Classic and replayed over home after leaving (TRACE's labels were not). `graph.c` `symce_text` now parks the
+shadow rows a text can touch in 0xD13800 and puts them back. Flag `(iy+0x4A)` bit 3 (0xD000CA) picks the shadow
+bank the OS records into (0xD052C6 instead of 0xD031F6), but home replays that bank too, so it is no way out.
 
 **Result prologue** before `0x91FC2`: `res 7,(0xD000D3)`; `res 0,(0xD0009F)`,
 `res 4,(0xD0009F)`; `set 2,(0xD000C9)`, `res 6,(0xD000C9)`; zero `0xD00338`,
@@ -934,6 +1018,14 @@ scratch hook, MathPrint and Classic). At A=2, after `pop iy` (so
   it "from another SymCE build".
 - `_InsertMem` / `_DelMem` / VAT create-delete shift user RAM and do **not** fix
   the edit pointers. Never allocate while the edit buffer is open.
+- **Creating a variable under the live home screen resets the next put-away** (*measured*
+  2026-10-04). SymCE's grapher called StoX/StoY (CreateReal) from the home context: with an
+  entry of 2..6 tokens pending, no history and X/Y absent, the next Y=/WINDOW/MODE/CALC
+  gave "RAM Cleared". 1 token, 7+ tokens, a history line, or X/Y already there: fine, and
+  any variable (A as well as X) triggers it. Cause not traced into the OS; the cure is TI's
+  own order: `NewContext0(kMode)` (home put away), create, `NewContext0(kQuit)`. SymCE does
+  it in `graphMain` only when a variable it may store is missing (`graphNeed`). During that
+  first graph cxCurApp reads 45h, not 40h.
 - SymCE v15 appvars `SYMCEHK` (hook master copy) and `SYMCEPV` (previous hook
   pointer + armed flag): the flash-app installer deletes them; nothing reads them.
 
@@ -1297,8 +1389,69 @@ on that branch; the drivers are the gitignored `tools/emu/_graph*.py`.
   the end. The hook could not feed y to skip the parser, so the OS stays at
   about 14-40 ms per point whatever the hook does.
 - SymCE's scratch at `0xD0EE00` survives graphing.
-- Consequence: SymCE draws its own graph (`src/graph.c`, the settings screen's
-  `4: Graph`), straight into VRAM, full screen, in float32.
+- Consequence: SymCE draws its own graph (`src/graph.c`, opened by the GRAPH key
+  through the raw key hook; settings row `4: GRAPH key`), straight into VRAM, full screen, in float32.
+
+### TI's graph screen, what SymCE copies (*measured* 2026-09-30, 5.8.4)
+
+Stock ROM, CEmu autotester, Full mode, ZStandard. Drivers `tools/emu/_ti*.py` (gitignored; `_ti.py` core, `_tilib.py`, `_tiu.py`, `_tigl.py` glyph decoder; batches `_ti_a*`, `_ti_b*`, `_ti_c*`, `_ti_d*`, `_ti_e*`). PNGs `tools/emu/_png/ti_*.png`. M = measured, I = inferred.
+
+**A. Layout (M)** Status bar rows 0..29 (0x52AA, white small text, battery top right). Rows 30..45 and everything outside the plot = 0xE71C. Plot = x 27..291, y 46..210 (265x165, 264x164 intervals), white, no border. Axes 1 px black at x=159, y=128. Ticks black, 7 px (+-3). Tick x = round(27+(k*Xscl-Xmin)*264/(Xmax-Xmin)); y = 46+round((Ymax-v)*164/(Ymax-Ymin)), round half up. Top-left label (rows 32..41, small font, function colour): `Y1=sin(X)`; in CALC/zoom a mode title row 30..45 (`CALC ZERO`, `ZOOM BOX`, `ZOOM IN`; ZInteger none) and the `Y1=` label below it. Bottom text `X=` at x=28, `Y=` at x=162, glyph top y=226 (small variable font, 9-char number field, trailing zeros dropped, negative sign = negation glyph, colour = function colour in trace/CALC, black in free mode). Prompt (`Left Bound?`, `Guess?`, `Lower Limit?`, `First curve?`, `Second curve?`) in black at bottom-left one row above X=/Y=. Typed-number prompt: white box rows 216..234, 1 px black top and bottom, large font 12 px pitch, `X=2.5` at x=2, block cursor. PNGs: ti_plain, ti_menu_{fmt,zm0,zm1,calc,draw}, ti_window, ti_calc_*, ti_setf_a.
+
+**B. Free cursor / TRACE (M)**
+- RAM: curGStyle 0xD0146D, curGY 0xD0146E (px from bottom, 0..164; 165 = off screen), curGX 0xD0146F (2 B, 0..264), copies 0xD01476/77.
+- Free cursor hidden until first arrow; starts at centre (132,82); tap = 1 px; hold repeats after ~0.5 s; stops at edge, NO panning; style 07. Trace style 0x51; ZBox 19/9; Zoom In 11; Zoom Out 13; ZInteger 21.
+- Cursor 9x9, blinks 2 frames (~0.35-0.4 s each), black, interior cleared white. Free frame0 circle+plus, frame1 bold plus. Trace frames: see ti_tr_*.png.
+- TRACE starts at centre pixel, X=(Xmin+Xmax)/2, lowest selected function; arrow = TraceStep = 2 px; Y exact. UP = previous function number with wrap (skips deselected), DOWN = next.
+- Undefined Y: `Y=` blank, no cursor. Off-screen Y: text shown, no cursor, gy=165.
+- Edge pan: stepping past gx=264 (or 0) shifts Xmin/Xmax by 16 px-columns of DeltaX (1.2121212 at ZStd); cursor lands at column 250 (left edge ~12). Only X pans.
+- Digit opens `X=` prompt; ENTER moves exactly. Out-of-window -> ERROR: INVALID (1:Quit 2:Goto; see phase 1b below). 
+- ENTER in trace = QuickZoom: same width/height, recentred on traced point (X and Y), redraw, trace continues at centre pixel. CLEAR / GRAPH / ENTER on free cursor -> plain graph, cursor position forgotten. 2nd QUIT -> home. CLEAR on plain graph -> home. 2nd TRACE in trace opens CALC.
+- Side effects (M, corrected): free cursor and trace set X and Y (free cursor: X=cursor X, Y=cursor Y; trace: X and f(X)); **Ans is NOT changed** (earlier reading was contaminated by reading X first). Plain graph drawing itself leaves X=Xmax-ish (10) and Y=last function value (sin 10).
+- ExprOff: flag only (traceFlags bit0); look on screen untested. CoordOff flag only.
+- Phase 1b measurements: see §11c "Free cursor and TRACE".
+
+**WINDOW (M)** DeltaX 0xD01FAE, DeltaY 0xD01FB7, TraceStep 0xD0203D, Xmin 0xD01E33, Xmax 0xD01E3C, Xscl 0xD01E45, Ymin 0xD01E4E, Ymax 0xD01E57, Yscl 0xD01E60. ZStd: DeltaX=20/264, DeltaY=20/164, TraceStep=2*DeltaX. Editing/storing TraceStep rewrites DeltaX=TS/2 and Xmax=Xmin+264*DeltaX; editing Xmax makes TS=2*DeltaX again. So in function mode TraceStep is ALWAYS 2*DeltaX; the spec's "honour OS TraceStep" branch is unreachable (parametric/polar untested).
+
+**C. FORMAT / flags (M, RAM diff; iy=0xD00080)**
+- grfDBFlags iy+4 (0xD00084): bit0 Dot(mode), bit1 Simul (0x02), bit2 Grid (GridDot 0x04; GridLine 0x84, bit7 = line), bit3 PolarGC (0x08), bit4 CoordOff (0x10), bit6 LabelOn (0x40). bit5 unused here (Axes is a colour, not on/off).
+- traceFlags iy+0x18 (0xD00098) bit0 = ExprOff. asymptoteFlags iy+0x47 (0xD000C7) bit0 = Detect Asymptotes Off.
+- Colours: GridColor 0xD024F1 (default 0x0D MEDGRAY), Axes colour 0xD024F2 (default 3 BLACK), each step +1 per RIGHT; BorderColor = graphBGColor 0xD02A98 (RGB565, default E71C, +1 -> BF59); Background choice 0xD024F3/F5/F6.. (+0xD000CF bit0, image-style, not decoded).
+- Palette (M: ROM table 0x80344, confirmed in pixels for idx 4, 14, 13): 1 BLUE 001F, 2 RED F800, 3 BLACK 0000, 4 MAGENTA F81F, 5 GREEN 04E0, 6 ORANGE FC64, 7 BROWN B100, 8 NAVY 0010, 9 LTBLUE 049F, 10 YELLOW FFE0, 11 WHITE FFFF, 12 LTGRAY E71C, 13 MEDGRAY C618, 14 GRAY 8C51, 15 DARKGRAY 52AA. Default grid pixel = C618. Grid lines 1 px.
+- y1LineType 0xD024BF (8 B, Yn then others), colour 0xD024D8. Y= popup (left*8 from end of expression, ENTER on the icon: Color + Line; OK) cycles values 1,2,3,4,5,6,7,0. Looks (graphs ti_lsg_* via _m6): 0 thin 1 px; 1 default normal line (~2 px); 2 shade above (vertical hatch, every other column, from top); 3 shade below; 4 path (curve + circle marker at end); 5 animate (only circle); 6 thick/dot-thick; 7 dotted thin. Y= default colours 1..7 blue red black magenta green orange brown (Y8 blue).
+- MODE: grfModeFlags iy+2 (0xD00082): Func 0x10, Pol 0x20, Par 0x40, Seq 0x80 (mode diff: 12->22 Pol, 12->82 Seq). Dot mode: all LineType bytes set to 6, 0xD000D2=1 (so 6 = Dot). Simul = iy+4 bit1. Horiz/G-T split: sGrFlags 0xD00094 (Horiz 01, G-T 06) plus YOffset 0xD014FC etc. Degree = iy+0 bit2 (0xD00080 20->24). Stat plot bytes 0xD0228E.. (Plot1XYOnOff) not re-diffed.
+
+**D. ZOOM windows from ZStd with Y1=sin(X) (M)** unit D=1/264 of width, E=1/164 of height.
+| item | result |
+| ZDecimal | X -6.6..6.6, Y -4.1..4.1 (DeltaX=DeltaY=0.05; Xmin=-132*0.05) |
+| ZSquare | keeps the axis with the LARGER delta, expands other axis symmetrically about its centre until DeltaX=DeltaY. ZStd -> X +-16.0975610 (=10*264/164). Skew X -5..5,Y -1..1 -> Y +-3.10606 (Y expanded). X -30..-10,Y 0..100 -> X -100.4878..60.4878 (X expanded about -20) |
+| ZStandard | +-10, Xscl=Yscl=1 |
+| ZTrig rad | X +-132*pi/48 = +-8.6393798, Xscl pi/2, Y +-4, Yscl 1 |
+| ZTrig deg | X +-495 (=132*3.75), Xscl 90, Y +-4 |
+| ZInteger | ENTER: X -66..66, Y -41..41, scl 10, Delta 0.5. Cursor prompt (style 21): cursor moved (+10px,+5 up -> X .7576 Y .6098) -> centre rounds to (1,1): X -65..67, Y -40..42 |
+| ZoomFit | Y only, X unchanged; Ymin/Ymax = min/max of 265 sampled values (sin: +-0.999881125; X^2/5: 0..20) |
+| ZQuadrant1 | X 0..13.2, Y 0..13.2 (DeltaX .05, DeltaY 13.2/164) |
+| ZFrac 1/2,1/3,1/4,1/5,1/8,1/10 | DeltaX=DeltaY=f/2, TraceStep=f; X=-132*Delta..+132*Delta, Y=-82*Delta..+82*Delta. 1/2: X +-33, Y +-20.5. 1/3: +-22, +-13.6667. 1/4: +-16.5, +-10.25. 1/5: +-13.2, +-8.2. 1/8: +-8.25, +-5.125. 1/10: +-6.6, +-4.1 |
+| ZBox (style 19 then 9) | cursor at centre; ENTER corner1, move, ENTER corner2: window = exactly the two corner pixel coordinates (-0.6060606..1.1363636, Y -0.4878049..0.3658537 at px (124,78)-(147,85)); Xscl/Yscl unchanged |
+| Zoom In (style 11) | XFact=YFact=4 default; ENTER at cursor X=0.3787879 -> width/4 centred on cursor (X -2.1212121..2.8787879, Y +-2.5 about cursor Y 0) |
+| Zoom Out (13) | ENTER -> x4 about the cursor (+-40) |
+| ZPrevious / ZoomSto / ZoomRcl | verified by windows: Prev returns the window before the last zoom (ZStd after ZDecimal); Sto+Rcl round-trips (ZDecimal) |
+| SetFactors | screen `ZOOM FACTORS` (XFact= cursor, YFact=4) png ti_setf_a |
+Menu order (M): ZOOM tab0 down-count n=0..16: ZBox ZoomIn ZoomOut ZDecimal ZSquare ZStandard ZTrig ZInteger ZoomStat ZoomFit ZQuadrant1 ZFrac1/2 ZFrac1/3 ZFrac1/4 ZFrac1/5 ZFrac1/8 ZFrac1/10 (keycodes 005F 005C 005D 0060 0062 0063 0064 0067 0068 005B FBC0..FBC6 in ROM; 7 FBC entries but 6 fracs + Q1 observed => FBC0 may be ZQuadrant1). Tab1: ZPrevious ZoomSto ZoomRcl SetFactors (005E 0066 0065 0051).
+
+**E. CALC, Y1=X^2-2, Y2=X (M)** Stage title `CALC <NAME>` in rows 30..45; function label below. Cursor at CALC start = centre, moves 2 px per arrow (TraceStep). curGStyle: value 0x4F after result; zero 83/85/87 (0x53/55/57: left, right, guess); intersect 101/103/89 (0x65/67/59) for first, second, guess; min 105/107/109; max 119/121/123; dy/dx 99; integral 95/97. Bound markers: small triangle at top plus dotted vertical line. 
+- value: prompt box `X=` (typed) -> result `X=1.5 Y=0.25` (style 0x4F, bold X marker).
+- zero: Left Bound? Right Bound? Guess? -> `Zero X=-1.414214 Y=0` bottom-left label + coordinates; ERROR: NO SIGN CHANGE screen if root not bracketed (bounds -3.48 and -1.97 tried).
+- minimum/maximum: same 3 prompts; result `Minimum X=0 Y=-2` (exact), `Maximum X=1.9696932 Y=1.8796915` (endpoint, not bracketed).
+- intersect: First curve? Second curve? (cursor on Y2, first marker stays) Guess? -> `Intersection X=2 Y=2`.
+- dy/dx: cursor moves freely, ENTER -> `dy/dx=6.0606061` line above X=/Y=. Title `CALC DERIVATIVE AT POINT`.
+- integral: `Lower Limit?` `Upper Limit?` (I) -> vertical hatch shading in function colour between curve and x-axis, text `Jf(x)dx=6.4297706` + `[-3.030303,3.030303]`. Title `CALC INTEGRAL OVER INTERVAL`.
+- Timings not measured (all finish inside 1.5-2.5 s wait).
+
+**F. Menus (M)** menuCurrent: ZOOM 0x04 (tab 0 has 17 items, tab1 4), CALC 0x11 (7), DRAW 0x05 (tabs 11/7/4/2), FORMAT = screen (menuCurrent 0). cxCurApp = 0x44 with a menu open from the graph. OS key codes: Right 01, Left 02, Up 03, Down 04, Enter 05, Clear 09, Del 0A, Quit 40, Graph 44, Mode 45, Window 48, Y= 49, Format 57, Trace 5A. CALC keycodes value 0075 zero 0079 min 007D max 007E intersect 0076 dy/dx 0077 int 0078.
+
+Not measured: stat plots, polar/parametric trace step, ExprOff/CoordOff visuals, ERR Goto, CALC timings, Background image option, DRAW items.
+
 
 ### SymCE's grapher on the calculator (*measured* 2026-09-29, `tools/emu/graph.py`)
 
@@ -1403,6 +1556,185 @@ on that branch; the drivers are the gitignored `tools/emu/_graph*.py`.
   `E71C` screen background.
 
 ---
+
+## 11c. SymCE grapher as a TI clone (phase 1a, 2026-09-30)
+
+- **Flags that send GRAPH to TI's own graph**: stat plot on = bit 0 of `0xD0228E` /
+  `0xD022A0` / `0xD022B2` (plots 1-3); background image = nonzero `0xD024F3` (also
+  `0xD000CF`); Xres real at `0xD01EF0`; `asymptoteFlags` `0xD000C7` bit 0 *set* = Detect
+  Asymptotes OFF. TI's graph with a stat plot on and no list data ends in an error
+  screen (cxCurApp `0x52`), which is what the fallback gives too.
+- **Returning a key from the raw key hook**: after `NewContext0(kQuit)`, `ret` with `A` = key
+  makes the OS act as if that key was pressed at home (this is how Y=, WINDOW, MODE, FORMAT,
+  TABLE, TBLSET, TRACE and GRAPH reach the same cxCurApp as from TI's graph). `JForceCmd`
+  with `A` = key does *not* switch context. Menu keys (ZOOM, MATH, STAT, VARS, APPS, 2nd CALC,
+  DRAW, LIST ...) therefore open their menu over home (cx `0x40`), where TI opens it over the
+  graph (`0x44`); phases 1c and 1d need the menu hook for that.
+- **Calling the OS parser from C** (`_symce_osy`): `Mov9ToOP1` + `StoX`, OP1 = `03 5E 1n 00`
+  (an Yn name), `push ix`, `push errSP`(`0xD02596`), `PushErrorHandler` `0x20798`, `FindSym`
+  `0x20510`, `ParseInp` `0x20F00`, `PopErrorHandler` `0x2079C`. No `StoAns`, so `Ans` stays
+  as it was. The error path must `pop de`, `FixTempCnt` `0x20E80`, `res 0,(iy+7)`. Y is stored
+  with `StoY` `0x20F3C`. After a draw TI leaves X = Xmin + 264*DeltaX and Y = last value.
+- **Layout**: plot 319x219 at (0,0), bar rows 219..239 and column 319 in the border colour.
+  Line styles: thin 1 px; normal adds (x+1,y) and (x,y+1); dot-thick 3x3 blocks, unconnected;
+  dotted a pixel on even columns. GridDot is a 3x3 block at each intersection, GridLine 1 px.
+- **Compiler trap**: clang-ez80 dropped the NEG in a `neg ^= 1` toggle loop (`(-)X` plotted as
+  `X`). Use recursion (`unary` -> `negpost`) and write bool-to-float as `c ? 1.0f : 0.0f`.
+- **Test harness**: `vram.grab` (step=1) makes TI's own graph draw blank; take TI reference
+  shots with `_ti.go` (`graph.tishot`). After leaving the SymCE settings app send
+  `2nd mode .` once more. `screen.read` step=0 is fine for RAM/cx reads.
+- **Y= popup keys** (Color and Line): `left*8 enter` opens it; right changes the colour
+  (1 BLUE ... 15); `down` moves to Line, rights step the style (1, 2 ... 7, 0); `down enter`
+  confirms. Keys named in the harness: x^-1 = `-1`, comma = `,`, negation = `(-)`, ANS = `2nd (-)`.
+
+### Free cursor and TRACE (phase 1b, *measured* 2026-09-30, `tools/emu/trace.py`)
+
+- **Compared with TI** (same keys, GRAPH key setting 4 off): X, Y, Ans, Xmin..Yscl, DeltaX/Y,
+  TraceStep, ZPrevious, the X/Y variables, home-screen X/Y/Ans, bar glyphs. Cases free (R7 U4),
+  trace, R5 L3, UP/DOWN, pan right and left, typed 2.5 (+ next arrow), out-of-window, QuickZoom
+  (also after ZStandard, ZPrevious after it). All equal.
+- **X/Y**: free cursor X = Xmin + rnd10(gx*DeltaX) (rnd10 = round half up to 10 digits; the sum is not
+  rounded again), Y = Ymin + rnd10(gy*DeltaY). Trace X = x0 + rnd10(p*DeltaX), p = gx + 16*pans.
+- **Pan**: lands at column 250 (right) or 14 (left). Xmin' = rnd10(Xmin +- rnd10(16*DeltaX)); TI sets bit
+  0x40 in byte 0 of the new Xmin (flag byte, always: 0x40 / 0xC0); Xmax' = rnd10(Xmin' + rnd10(264*DeltaX)).
+- **Typed X**: stored as typed (gx = round((X-Xmin)/DX)); the next arrow snaps t = floor((X-Xmin)/TraceStep
+  + 0.5), gx = 2t, then +-2.
+- **QuickZoom (ENTER)**: Xmin' = rnd10(X-hw), Xmax' = rnd10(X+hw), hw = (Xmax-Xmin)/2, Y alike; DeltaX, DeltaY
+  = (max-min)/264, /164 and TraceStep = 2*DeltaX recomputed; the OLD window (54 B from 0xD01E33) is copied to
+  ZPrevious 0xD01FFC. X, Y stay as traced; trace continues at gx 132.
+- **X= box**: general expression editor (digits . (-) operators X pi EE sin( STO ...), arrows ignored, DEL
+  deletes last, CLEAR clears (empty: plain graph), TRACE restarts trace, GRAPH plain, Y= leaves, 2nd QUIT
+  home. ENTER on "2+" or "(" -> ERROR: SYNTAX (cx 0x52); outside [Xmin,Xmax] -> ERROR: INVALID (0x8F, has
+  2:Goto). After Quit: cx 0x40. Goto on TI: cx 0x44, curG 51 52 84, trace at centre in TI's graph. SymCE
+  deviation: Goto goes home (cx 0x40); a hand-built graph context (NewContext0 0x44 + cxErrorEP 0x6C96D)
+  RAM-cleared the calculator, so not done. Box look: white rows 216..234, black lines at 216 and 234, large
+  font 12 px pitch from x=2, glyph top 219, block cursor 10x14.
+- **Look**: SymCE's bar is rows 219..239; the glyphs are the same as TI's, 2 rows lower (text top 228 vs 226).
+  Trace cursor black with white interior; text colour = function colour in trace, black in free mode.
+- **Evaluator without StoAns**: `_symce_eval` = CreatetEqu `0x2055C`, OP4ToOP1 `0x202C8`, ParseInp `0x20F00`
+  under PushErrorHandler `0x20798` (like `_symce_osy`). Number text: wrapper `0x9968B` (A=9, OP1 in, HL=OP3
+  out; `set 6,(iy+29)` first). Token text: `0x5E43B` (token in DE), `0xA2C17`; two-byte prefixes 5C 5D 5E 60 61
+  62 63 7E AA BB EF. Error: `JError` `0x20790`, Invalid 0x8F, Syntax 0x88. pen: penCol `0xD008D2` (16 bit, write
+  bytes), penRow `0xD008D5`, colours `0xD026AC` fg / `0xD026AA` bg, large font = bit 2 of (iy+0x32).
+- **Time source**: timer 1 (control `0xF20030`, counter `0xF20000`) at 32768 Hz, started by `graphMain` (save and
+  restore the control word, state in GW+0xC04), counting up. Blink 10500 ticks (320 ms), hold delay 16384 (0.5 s),
+  repeat 3015 (92 ms, 5 px per free repeat). Held keys read from the keypad data register `0xF5001E`
+  (Down 1, Left 2, Right 4, Up 8). The idle loop sends key 0xFF to the grapher as a tick.
+- **GW additions**: struct gw after `buf` holds mode, cursor, label/bar save buffer (plotSScreen `0xD09466`),
+  entry text. The opening key is kept in GW+0xC07 (GRAPH or TRACE).
+
+### ZOOM on SymCE's graph (phase 1c, *measured* 2026-10-01, `tools/emu/trace.py` z* cases and `menus`)
+
+- **Menu hook event 3 (a pick)**: B is the picked item's KEY CODE, whether ENTER or the item's digit was
+  pressed. ZOOM tab 0: ZBox 5F, ZoomIn 5C, ZoomOut 5D, ZDecimal 60, ZSquare 62, ZStandard 63, ZTrig 64,
+  ZInteger 67, ZoomStat 68, ZoomFit 5B; tab 1 (ZOOM MEMORY): ZPrevious 5E, ZoomSto 66, ZoomRcl 65,
+  SetFactors 51. The letter items (ZQuadrant1, ZFrac 1/2 1/3 1/4 1/5 1/8 1/10) come as B = 0FBh with
+  `keyExtend 0xD0058E` = C0..C6. Return Z = the OS goes on (`ld a,b`). The raw key hook sees keys pressed
+  while a menu is up, but NOT the picked item's code.
+- **Arming**: `symce_mhook` (main.asm) is armed when the GRAPH key setting is on OR the CAS is on. Event 3 ->
+  `menuKey` (ZOOM interception, only if `gkeyIsOn` and menuCurrent 0xD00824 = 4); the other events go to the CAS
+  shim (`symce_mhook_cas`, the 2nd MATH tab) only if `casIsOn`, else Z. Settings 1 (CAS off) clears the hook only
+  when GRAPH is off too; 4 off only when CAS is off. The installer arms it as before.
+- **Hook event 4 (a menu opens)** saves `curRow/curCol` (0xD00595) in `GW+0xC0B` (GWC): the menu moves the home
+  cursor, and a pick that leaves into the grapher puts it back.
+- **Pick -> grapher** (`menuKey .run`): GWA = 0FEh, `graphMain` = fallback probe (returns 0FFh when TI's graph must
+  do it: Polar etc.); then `NewContext0(kQuit)`, GWA = action 1..20 (the grapher's first key is 0C0h+action),
+  `graphMain` runs INSIDE the hook. Exit (a) home: restore the cursor, `set 5,(iy+17)`, `set 0,(iy+38)`,
+  menuCurrent/Sub = 0 and menuSelected = 1 (the OS's home values; without them the OS keeps taking keys as menu
+  keys: digits ignored, a later ENTER picks ZBox), `dec (0xD0265B)` (the hook depth the OS will never see
+  return), `jp JForceCmdNoChar`. (b) an OS key (the user pressed Y=, ZOOM, MATH ... on the graph): same, then
+  `ld sp,(0xD007FA)`, `res 1,(iy+40)`, `res 2,(iy+40)`, `jp 0x8C49F` with A = the key = the monitor's key
+  dispatch just after the raw key hook returns. **`JForceCmd` takes a TOKEN (0x8C5BA), not a key**: a menu key
+  through it does nothing.
+- **CLEAR marker** GWM (GW+0xC0E, bytes 0A5h 5Ah; NOT +0xC09 as written earlier, which is free) = 0A5h 5Ah when the grapher hands a menu key (2Bh..3Ch) to the OS. The raw key
+  hook clears it on any key but CLEAR and the arrows. **CLEAR in a menu is NOT a menu-hook event 3** (the OS
+  closes the menu itself); the raw key hook sees it: CLEAR with the marker set is treated as the GRAPH key
+  (`symce_khook` -> `.open`: leave the menu with NewContext0(kQuit), `graphMain`). 2nd QUIT in the menu goes
+  home (the key is not CLEAR, the marker is cleared).
+- **OS routines used** (all by `symce_rom`, iy = flags; `symce_roma` also sets A): `0x6EDDA` window -> ZPrevious
+  (0xD01FFC) and the ZPrevious-valid bit (iy+74 bit 7); jump table ZmInt 0x20C08, ZmDecml 0x20C0C, ZmPrev
+  0x20C10, ZmUsr (ZoomRcl) 0x20C14, SetUZM (ZoomSto) 0x20C18, ZmFit 0x20C1C (runs the graph, not callable),
+  ZmSquare 0x20C20, ZmTrig 0x20C24; ZQuadrant1 0xBD0F0; ZFrac 0xBD2C6 with A = 2 3 4 5 8 10 (dispatch at
+  0xBD332); ZoomIn/Out about X, Y: 0xB18E7 (carry = In, hl XFact/YFact); ZInteger's ENTER: 0x9AE22, 0x7FA0E,
+  0x9AE13, ZmInt. XFact 0xD01F9B, YFact 0xD01FA4 (4 default), ZSto block 0xD01D61 (54 B, the window's layout).
+- **What TI does after each zoom** (copied; every window variable byte equal): DeltaX = (Xmax-Xmin)/264, DeltaY =
+  (Ymax-Ymin)/164, TraceStep = 2 DeltaX are recomputed when the OS routine did not (ZSquare, ZPrevious, ZoomRcl,
+  ZStandard, ZoomFit; ZDecimal/ZTrig/ZQuadrant1/ZFrac set them). The OS's ZFrac puts the bits 0x18 in the first
+  byte of the window variables and DeltaX/Y; TraceStep gets them too. ZFrac TraceStep = (Xmax-Xmin)/132 (2*DX off
+  the rounded DX is 1 ulp high for 1/3); every other TS = 2 DeltaX.
+  ZoomFit writes rnd10 of the extremes of the 265 columns. ZPrevious holds the window from before.
+- **X after a draw** = Xmin + rnd10(264 DeltaX) (product first, so the flag bits ride along), not Xmax: ZTrig
+  leaves 8.639379793, not 8.639379797. This fixes phase 1a/1b's `symce_setx`, gone now. After a ZFrac draw X
+  keeps DeltaX's 0x18 bits (home shows 33.2 for ZFrac 1/4) unless X is a whole number (1/2, 1/3: 33, 22).
+- After ZBox / Zoom In / Zoom Out the cursor is at the centre and X, Y are the centre's (Xmin+132 DX, Ymin+82 DY),
+  as the free cursor stores them; ZInteger leaves X, Y as the draw left them.
+- Interactive zooms (ZBox, Zoom In/Out, ZInteger) leave the free cursor at the centre (gx 132, gy 82) with TI's
+  title row text (`ZOOM BOX`, `ZOOM IN`, `ZOOM OUT`). ZBox: first ENTER fixes a corner, the box (1 px outline, 7x7
+  marker) follows the cursor, the second ENTER writes the two corners as the window.
+- Fallback and passthrough: ZoomStat and SetFactors always go to the OS; if `graphMain`'s probe says TI's graph
+  (Polar, split screen, stat plot, ...) the pick is left to the OS too.
+- **Test**: `python3 trace.py <case>`; names z* (from the grapher), zh* (from home), `menus` (CLEAR, 2nd QUIT,
+  Polar fallback, CAS/GRAPH combinations). Letters via ALPHA+key (A math, B apps, C prgm, E sin, F cos, G tan); D
+  has no key name in the tester, so arrows + ENTER.
+
+### 2nd CALC on SymCE's big graph (phase 1d, *measured* 2026-10-01, `trace.py calc`)
+- The menu stays TI's (menuCurrent 0x11, 7 items). **A CALC pick does NOT reach the menu hook** (neither the
+  open nor the pick); the raw key hook `symce_khook` sees digit 1..7 (key codes 0x8F..0x95) or ENTER (item =
+  highlighted index at 0xD00826 + 1), only when menuCurrent==0x11 and the GWM marker is armed. `.cpick` asks
+  `graphMain` (GWA=0FEh probe) first: 0FFh = fallback conditions, key goes on to TI's CALC.
+- Stale hand-off RAM: `symce_khook` `.home` zeroes GWA; CLEAR-to-grapher needs both marker bytes AND a nonzero
+  menuCurrent (test `trace.py stale`).
+- OS routines (5.8.4): zero 0x6D3C4 (PushReal L,R; GEQNameA 0x91FA6; GRITSolver 0xA77AC; StoX), min/max
+  0x6D453.. (DFMin 0x5D688, A=0x6D min / 0x7B max, (D005F9)=0x7B), intersect 0x6D56B.. (tEqu of the two
+  functions, ITSolver 0xA7792; busy bit 2,(iy+7) set by 0xA81F5), dy/dx (RclVarSym 0x9AE26, ThreeExec 0x67EBE with
+  A=0x25). Traced function number is 0xD01474 (1-based). SymCE calls the same solvers (`symce_calc`) so digits match.
+- Effects (TI, copied): value leaves Ans, X typed, Y=f(X). zero/min/max/intersect: Ans=X=result, Y=f(X).
+  dy/dx: Ans=derivative, X/Y unchanged. Integral: Ans=integral; **X = pixel (round to nearest of TI's DeltaX grid)
+  of the LARGER limit, Y = f(second limit exactly as typed)**; reversed limits give a negative integral, no error.
+  CLEAR mid-prompt: X/Y unchanged, Ans unchanged.
+- Screens: prompts black at (28,214); results in the function colour; integral line 2 `[lo,hi]` replaces X=/Y=;
+  shading = solid fill x-axis..curve; bound markers in function colour (dotted line + 9-row triangle widths
+  1,2,3,5,5,5,3,2,1).
+- Errors: `symce_throw` calls DrawStatusBar (0x21A3C; the big graph covers it) and, inside a CALC (`cthrow`), restores the
+  home cursor (curRow from GWC; the OS text routines moved it) before JError. Harness: the home-screen cursor glyph
+  0xE0 in the text shadow is a clock phase, `trace.py` blanks it. The cursor is saved at GRAPH from home (khook `.open`), since no menu hook runs for CALC.
+- Known deviation: after a result cxCurApp is 0x40 on SymCE, 0x44 on TI (SymCE's grapher is not an OS context).
+- Test: `python3 trace.py calc` (21 cases, TI vs SymCE; PNGs `_png/symce_calc_*.png`). Harness note: tools/emu loads
+  its own copies of SYMCE.8xp / SYMCE*.8xv: copy fresh builds there.
+
+### Grapher speed pass after phase 1a (*measured* 2026-09-30, `graph.py time`, +-20 ms)
+
+  | Y= | before 1a | after 1a | now | OS |
+  |---|---|---|---|---|
+  | `X` | 80 | 460 | 140 | 1864 |
+  | `sin(X)` | 320 | 720 | 400 | 2804 |
+  | `X^2` | 60 | 260 | 120 | 1624 |
+  | `sin(X)/X+cos(3X)` | 640 | 1120 | 720 | 5740 |
+  | `sqrt(X)` | 140 | 529 | 230 | 1544 |
+  | `sin`,`cos`,`X^2/5` | 800 | 1920 | 920 | 7480 |
+
+  So 6.7-13.5x faster than the OS graph; "before 1a" is not reached: the pixel-identical
+  `x0 + s*xspan/318` costs an `fdiv` per column (the old `x0 + s*dx` did not), and the
+  3-pixel pen costs more than a vertical fill. Pixels are byte-identical to 9f0cb68 (39
+  screens, plus X/Y/Ans). Per X column (cycles, timer 1): 26,700 after 1a, now ~16,900.
+- Soft float, cycles each (a loop of 100, minus its load/store): `fadd` ~1300, `fmul` ~800,
+  `fdiv` ~2300, int->float ~800; a trivial `run()` ~900.
+- **clang folds byte reads of a float into shifts**: `memcpy(b,&r,4)` or a cast to bytes
+  becomes `__lshru`/`__ishru`/`__ior`/`__land` calls (~3,000 cycles). A `volatile float`
+  copy forces a store and each byte is one load: the row of a float went 3,400 -> 760.
+  Same for "is it below 1e30": it turned a byte test into `fabsf` + `__lcmpu`.
+- `floor(fl(r + 0.5))` for 0 <= r < 256 is the mantissa's top byte shifted, plus the bit
+  below; the float add never rounds across an integer except r = 0x3EFFFFFF (-> 1). Checked
+  against `rnd` for every float bit pattern in 1/32..512 and the negatives.
+- A big struct offset (`w->y1` at +1280) costs ~6 instructions per float load; copying to
+  locals did not help (the frame spills). `line` had 18 `__imulu` calls (clang turns
+  `(y<<8)+(y<<6)` back into `y*320`); `step` writes the interior case by pointer.
+- An integer `fl(fl(s*span)/318)` (exact on 2.7e9 host cases) was twice as slow as the
+  soft-float path: 24-bit `__idivu` costs more than the ROM `fdiv`. Not used.
+- Not measured: the 8 KB flash cache (§10) may add layout-dependent misses.
+- Timing tool: timer 1 as a cycle counter (clear `0x207` of `0xF20030`, zero `0xF20000`, set
+  `0x201`); read the sums from RAM with `screen.read`. Per-curve ms: draw 5 copies of the
+  equation, subtract the empty draw, divide (4 ms resolution).
 
 ## 12. SymCE history (why things are the way they are)
 
@@ -1606,6 +1938,8 @@ on the first return, the error number on the second (an error thrown
 before `os_PopErrorHandler`). No C++ destructor unwinding.
 
 ### Timers
+(SymCE's grapher does use Timer 1 as a 32 kHz blink/repeat clock: see §11c "Free cursor and TRACE"; it saves and restores the control word.)
+
 Reservations: **Timer 1** = `clock()`/`sleep()`, **Timer 2** = usbdrvce,
 **Timer 3** = "used by the TI-OS USB stack and shouldn't be touched in
 almost every case... may cause the above functions and/or libraries to
@@ -1723,3 +2057,67 @@ enable bits and our pointers only ("on" = our pointer with the bit set);
 APPS>SymCE OFF clears each only if it points into SymCE. The app grew by
 about 6 KB (138,023 to about 144 KB). Licence: glyphs derive from Roboto
 (SIL OFL 1.1, `symce/font/OFL.txt`).
+
+## Par/Pol 2nd CALC (SymCE graph, 2026-10-04)
+
+- CALC menus: menuCurrent (0xD00824) 0x11 Func, 0x3A Par, 0x3B Pol. The raw key hook must accept all three; item counts 7 / 4 / 3.
+- Handler 0x6D2E9: GEQNameA (0x91FA6), then mode flags (0xD00082 bit 4 Func, 5 Pol, 6 Par); stage code at (0xD0146D) picks the item.
+- Derivatives: 0x5E227 d/dX (Func dy/dx), 0x5E231 d/dtheta (Pol dr/dtheta), 0x5E23B d/dT (Par dy/dt, dx/dt), 0x5E25A then 0x7CB69 Pol dy/dx, 0x5E2D6 Par dy/dx (after 0x80177, PushRealO1 0x82A11, res 0,(hl)). All finish with CkOP1Real 0x7F86D, result in OP1.
+- Var-name setters: 0x8005F theta, 0x80063 R, 0x80077 X, 0x8007B Y, 0x8007F T. T or theta must be stored before the derivative runs.
+- After a CALC result, TI's free cursor leaves T/theta (and R) at the traced value; a redraw steps them to Tmax, so a clone must restore them (graph.c replot).
+
+## Seq graph mode (SymCE graph, 2026-10-05)
+
+- Sequence terms: `0xD01D0F + 18*i` (u,v,w). First 9 bytes = current term, next 9 = previous. Type byte `&0x1F` must be 0 (real) or the term is bad.
+- Window: nMin `0xD01EC3`, nMax `0xD01EA8`, PlotStart `0xD01E9F`, PlotStep `0xD01EE7`. seqFlags `0xD0008F`: bit0 Web, bit2 uv, bit3 vw, bit4 uw. Line style bytes `0xD024D5+i` (6 = dot). Colour bytes `0xD024EE..F0`.
+- `0xD02032` = u/v/w selected bits. `0xD02033` = recursion depth (0 explicit, 1 u(n-1), 2 u(n-2)). n variable at `0xD02034`.
+- OS calls: flags `0x285AA` then SeqSet `0x7D633`; SeqSolve `0x7D683` advances to n. Restart (SeqSet) for any lower n. Returns OS error code.
+- Equation tokens: u( = `5E 80`, v = `5E 81`, w = `5E 82`, "(" separate `10`, n = `62 21`. `u(n-1)` = `5E 80 10 62 21 71 31 11`. Key "2nd 7" inserts only the `u` token.
+- y= editor rows per sequence on CE: u(n), u(1), u(2), v(n), v(1), v(2), w(n)...
+- Plotted n = nMin + PlotStart - 1 + k*PlotStep up to nMax. Trace grid identical. After draw: X = last n, Y = its term (last selected sequence). After trace + CLEAR, X/Y keep trace values.
+- Trace bar: "n=" over "X=n  Y=term"; label "u=" etc. Typed n: ERR:INVALID (0x8F) first when outside [start, nMax], then DOMAIN (0x84) for non-integer (compare with ~1e-5 tolerance).
+- ZStandard and Q1 reset nMin,nMax,PlotStart,PlotStep to 1,10,1,1. Other zooms keep them. ZoomFit stays with TI.
+- Seq 2nd CALC menu id `0x3C`, one item (value). After value, up/down keep tracing (swap sequence); left/right give a free cursor.
+- Term error (e.g. DIVIDE BY 0): earlier points drawn, X/Y stored, then OS error screen.
+- Hang: SymCE calling SeqSolve for u(n-2) hung at n=3 (cause unknown, call pattern differs from TI's). SymCE only takes exact `u(n-1)`; u(n-2), Web, uv/vw/uw, non-dot line styles fall to TI.
+
+## Stat plots (SymCE grapher, graph_stat.c)
+
+- Plot records: 3 x 18 bytes at 0xD0227E (plot n at +18n). Byte 0: low nibble type (0 Scatter, 1 xyLine, 2 ModBox, 3 Hist, 4 Box, 5 NormProb), high nibble mark (0 box, 1 cross, 2 dot). Bytes 1..5 X list name, 6..10 Y list name, 11..15 Freq list name (L1..L6 = 00 00 00 00 00 .. 05; a literal Freq 1 is '1'). Byte 16 bit 0 = plot on. Byte 17 = colour index as Y1's.
+- List lookup: OP1 (0xD005F8) = 01 (ListObj), 5D, then the 5 name bytes at OP1+2; call ChkFindSym 0x2050C; carry = not found, DE = data (finds archived lists too). Data = count word, then 9-byte reals.
+- ZoomStat = zoom menu key 0x68, SymCE action 9; call OS ZmStats 0x20B28 so the window bytes match TI.
+- TI maps a point to grid gx = round((x-Xmin)/DX), gy = round((y-Ymin)/DY) and draws at screen pixel (27+gx, 210-gy); only 0<=gx<=264, 0<=gy<=164 get a mark. Marks are 7x7: box = 2 px border, hollow centre; cross = 3x3 block with arms of 3; dot = 3x3. Plots draw before functions, plot 1 first.
+- Plot colour is pen colour; xyLine joins points with the thick pen in the plot colour, marks on top.
+- TRACE with a plot on is left to TI (graph_fall); mismatched list counts, undefined lists, complex lists and ZoomStat on a list of equal values (ERR:WINDOW RANGE) also fall to TI.
+- Histogram: bins of Xscl from Xmin, [left, right), weighted by Freq. A non-empty bin is a hollow rectangle drawn with the 2 px pen (pen extends right and down from the line) from the baseline y=0 to its count; the full-width baseline at y=0 is drawn in the plot colour. Empty bins draw nothing; everything is clipped at the grid.
+- Box (type 4) and ModBox (type 2): fixed rows whatever the window or plot number: box top rows 58-59, bottom 96-97 (grid y 152 and 114), whisker line rows 77-78 (grid y 133), caps rows 75-80, all 2 px pen at x = 27+gx..+1; median is a full-height vertical. Quartiles are 1-Var Stats': Q1/Q3 = medians of the lower/upper halves, the middle value left out when the count is odd (n=1: all five equal); Freq repeats a value. Box whiskers run to min and max; ModBox to the last values within Q1-1.5*IQR .. Q3+1.5*IQR (a value exactly on the fence is still inside); the others get the plot's mark (box/cross/dot) centred on grid y 133. Lines are clipped at the grid; a vertical at gx = -1 draws nothing (no pen reaches column 0). A list of equal values or a 1-value list gives ZoomStat a zero width window: ERR:WINDOW RANGE.
+- NormProb (type 5): sorted values against z = invNorm((i - 0.5) / n), i = 1..n (not the manual's (i-.375)/(n+.25)); byte 16 bit 4 = Data Axis Y (values on Y, z on X), else values on X. Marked like a scatter. ZoomStat (the OS) gives X = data range +-10%, Y = about +-1.34 * z(n) (e.g. +-2.265432983 for n = 11). TRACE shows X= and Y=, with Y to 7 digits (the OS invNorm is good to about 1e-7, e.g. Y=-1.690622).
+- TRACE over plots (SymCE does Scatter/xyLine): the label is the small font at the top left in the plot's colour ("Plot1:L1,L2", "Plot2:L1", "Plot3:L1"), the readout at the bottom ("X=3" left and "Y=2" from x ~163; Box shows "Med=4" etc.); up/down cycles through the plots then the functions.
+  Measured on TI (Scatter, ZoomStat, 5-point lists), for graph.c: TRACE starts at the lowest plot that is on, point 1. LEFT/RIGHT walk and clamp at the ends (no wrap), and the window never pans (an off-grid point shows X=/Y= and no cursor). UP/DOWN ring = plots that are on, then the selected functions, with wrap (UP from Plot1 goes to the last item). Plot to plot keeps the point index, clamped to the shorter list, and the clamped index stays; the index also survives a visit to a function (a function is entered at the centre column). ENTER = QuickZoom: window recentred on the point, ZPrevious saved, trace restarts at point 1 with the cursor at its place in the new window. A digit leaves to HOME and is typed there. CLEAR gives the plain graph (a following arrow gives a free cursor at an odd place, X=1.0181818 Y=1.9868293, not understood). 2nd CALC opens a garbage CALCULATE menu (7 items '3root('). TI quirk: DOWN/UP into Plot3, or RIGHT past the end then UP/DOWN, shows garbage ('Plot3:L4,L2' with stale X/Y); SymCE does not copy it and the tests avoid it. TI also leaves black outlines on visited points. Wait about 700 ms after TRACE before the first arrow or TI loses it.
+- HOME history after a ZOOM-menu pick (SymCE, 2026-10): GRAPH then CLEAR / 2nd QUIT / a digit from plot trace keeps TI's HOME history (0 px differ vs TI). But a ZOOM pick from HOME (e.g. ZoomStat) followed by CLEAR or 2nd QUIT leaves HOME with blank history above the entry line (4417 px differ). Pre-existing fault of the ZOOM-pick path in main.asm, not plot trace; cause not found (skipping the NewContext0(kQuit) there did not fix it).
+- Editor driving: Hist has X list + Freq; ModBox X list + Freq + mark; Box X list + Freq; NormProb List + Data Axis + Mark. Each plot can be configured once per boot with the harness.
+
+## 2nd DRAW on the SymCE graph (2026-10-04)
+
+- DRAW menu: menuCurrent (0xD00824) = 5; tab at 0xD00825 (0 DRAW, 1 POINTS, 2 STO), highlighted item 0-based at 0xD00826. Digits 1..9,0 (item 10) are keys k1..k9,k0 (0x8F..0x97, 0x8E). The menu reopens at the DRAW tab. From home every pick pastes; only the grapher can run them, so the raw key hook must intercept a pick when the grapher armed its menu mark.
+- The OS draws on a 265x165 logical grid in plotSScreen (0xD09466): 165 rows x 133 bytes, 4 bpp, high nibble = even x, row 0 = top (row = 164 - gy). The buffer holds the whole graph picture (functions too); TI's erase writes nibble 0. The low nibble of byte 132 per row is unused padding: SymCE keeps its signature there.
+- Mark shapes (cursor centre c): Pt-On / Pt-Off = a 7x7 ring 2 px thick (inner 3x3 untouched); Pt-Change = 3x3 block, each pixel flipped (on if off). Line/Horizontal/Vertical are ILine (ROM 0x7B2F5) and thick IPoint (0x7B501): Bresenham with e = 2*minor - major, the major axis steps every point, the point plus neighbours relative to the previous one.
+- Pt/Line cursor: the free cursor restarts at the last position of the previous DRAW session; a ZOOM resets it. Line( goes back to stage 0 after the second point.
+- Persistence: ring survives CLEAR, 2nd QUIT and GRAPH again, and a Y= edit that adds a function. Cleared by ClrDraw, any ZOOM except ZoomSto, a window change.
+- grfModeFlags (0xD00082) low bits change on a quit to home (0x12 -> 0x10): hash only the 0xF0 mode bits when deciding whether the graph is the same.
+- Emulator pitfalls: TI redraws a Horizontal/Vertical preview slowly and drops keys pressed meanwhile (pause every 8 cursor moves); a SymCE render with a pixel-by-pixel layer overlay of 70k pixels takes seconds in flash, so fill by logical cell and skip zero bytes.
+
+### TI drawings vs SymCE's layer (2026-10-05)
+- Dirty flag 0xD00083 bit 0: set = graph needs replot. TI's replot (home Line(, Circle(, Pt-On( ...) clears it and wipes the pad nibbles of plotSScreen (our signature).
+- SymCE marks plotSScreen magic A5C4 + window hash when it sees TI's drawing (dirty clear, no ours-signature): graph_fall hands the plain GRAPH key to TI until the window changes. Sticky until window change or ZOOM.
+- Known gap: a Y= edit between a home draw and GRAPH sets dirty, so the drawing is treated as fresh and lost (TI would replot too).
+
+### Y= edits and the drawing (*measured* on TI, 2026-10-05)
+- After a plot with a ring drawn: adding an equation to an empty slot and a Y= visit with no edit keep the drawing; changing, appending to, clearing, deselecting an equation TI had plotted drop it (a toggle off then on still drops it). Same after a home Line(: Y= change drops it, Y= add keeps it and plots the new function over it.
+- The OS's record: `0xD00097` (iy+0x17) bit 0 = an equation was added, bit 1 = one was changed/deleted/toggled; TI's plot clears both. Right after typing in Y1 before any plot it is 2. It works only for equations TI's own plot drew: after a SymCE render the same edits set bit 0 (also with the dirty flag clear and with 0xD024BE, 0xD01D49.. copied from TI's state), so SymCE cannot read it and keeps its own 8 bit signature per equation slot (pad nibbles 19..38 of the layer).
+- Site of the logic in the ROM: 0x7F1DE (selection toggle: on sets bit 0 unless bit 1, off sets bit 1 unless the type byte's bit 3 is set), 0x60CFD reads the equation VAT pointer at 0xD0244E (a VAT entry address: `dec hl` = flag byte, selected = bit 0).
+- Y= opens on the equation row it was left on by TI's graph, but at Y1 after SymCE's.
+
+### DRAW menu measurements, not shipped (2026-10-05)
+Measured on TI (ZStandard, layer diff via tools/emu drawm scenarios): Circle( from the graph is a 2-px ring, 22 px across for a 10-step radius (center 132/133, 81/82), not symmetric (right side one column wider), so it is a polyline of thick IPoint/ILine segments (ROM 0xAFC60..0xAFD96 area calls ILine 0x7B2F5 and thick IPoint 0x7B501 in a loop), not a midpoint circle; exact step count not recovered. Tangent( at x=0 on X^2 draws a 260-px 1-px line limited to the visible window. Pen draws a 1-px line along the cursor moves. Circle(, Tangent(, Pen, Text( and the STO tab stay with the OS: no exact match, so nothing ships. Home draw then Y= edit then GRAPH, and home ClrDraw then GRAPH, give SymCE's plain graph (trace.py homedraw hclr/hedit/hadd).
+The e2e `5->X stored -> SOLVE` FAIL predates the graph work: it fails identically on a 669c761 build (second SOLVE types `Y` then `►Frac` for the `2nd math 1` pick).

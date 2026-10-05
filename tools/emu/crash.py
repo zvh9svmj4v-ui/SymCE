@@ -36,6 +36,12 @@ TRIGGERS = [
     ("math",    "math . 2nd mode ."),
     ("statedit", "stat enter . 5 enter . 2nd mode ."),
     ("off/on",  "2nd on . . on . ."),
+    # SymCE's grapher with a 2-6 key entry pending, no history, X and Y not yet
+    # made (MathPrint: no "C"): it created them while the home screen was the live
+    # context and the next Y= reset the calculator. "C" at the end: textShadow
+    ("graphY",  "MP: y= xton ^2 - 4 2nd mode . 3 + graph . . y= . 2nd mode . C"),
+    # the everyday first graph: Y= editor, GRAPH (X and Y made then), back to Y=, again
+    ("yegraph", "MP: y= xton ^2 . graph . . y= . graph . . y= . 2nd mode . C"),
     ("on",      "on . on ."),
     # program editor: PRGM NEW, name A, a line that SymCE would answer at home
     ("prgmedit", "prgm left enter . math enter . 2 xton + 2 xton enter . 2nd mode ."),
@@ -82,6 +88,8 @@ TRIGGERS = [
 
 
 def check(prologue, files, launch, trigger, shift=""):
+    if trigger.startswith("MP:"):
+        prologue, trigger = prologue.replace("C ", "", 1), trigger[3:]
     r = screen.read([("hookptr", 0xD025E1, 3), ("flag", 0xD000B4, 1),
                      ("screen", screen.TEXTSHADOW, screen.COLS * screen.ROWS)],
                     keys=prologue + trigger + " clear . " + shift + "2 xton + 2 xton enter .",

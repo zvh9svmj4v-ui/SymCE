@@ -41,21 +41,53 @@ Build: `make -C symce` gives `symce/bin/SYMCE.8xp` (the installer) and
      on; ALPHA+DOWN opens the menu either way.
    - `3` to switch the Evo-style font (a Roboto-derived replacement for the
      calculator's text) between Evo and TI. It is independent of CAS.
-   - `4` opens the **Graph viewer**: Y1..Y0 (the ones selected in Y=, as the
-     OS would plot them) drawn full screen (320x220, info line below) in
-     float32, in their Y= line colours, over the current window and Radian or
-     Degree. Keys: `+` `-` zoom about the centre, arrows pan (hold one and it
-     keeps panning), `0` back to the window the OS has, `CLEAR` or `2nd` `MODE`
-     leaves. A draw takes 0.02-0.8 s (the OS graph: 1.5-7.5 s), and there is
-     no status bar or auto power down while it is open. It reads Y=, WINDOW, MODE and the
-     stored A-Z and theta; nothing is written back. Limits: an equation with
-     a token it cannot compute (anything past `+ - * / ^ ( )`, X, letters, pi,
-     e, the n/d bar, `x^2` `x^3` `x^-1`, sqrt( abs( ln( log( e^( 10^( and the
-     six trig and inverse-trig functions) is skipped and named on the info
-     line, e.g. `Y3: unsupported token 5E`; over 96 tokens or deeper than 6
-     parentheses is refused the same way. No grid, TRACE, CALC, parametric,
-     polar or sequence modes, stat plots, and the GRAPH key still opens the
-     OS graph. Archived Yn and archived variables are not read.
+   - `4` switches the **GRAPH key** between SYMCE (the default the installer
+     sets) and TI. With SYMCE, GRAPH opens SymCE's grapher from the home
+     screen, Y=, WINDOW and the other screens that would go to the OS graph
+     (an equation still being typed in Y= is filed first). It looks like TI's
+     graph, only bigger: a 319x219 plot with the axes, tick marks, grid
+     (GridDot or GridLine), axis labels, the 15 Y= colours and the line
+     styles (thin, normal, dot-thick, dotted) from FORMAT and Y=, Xres, and
+     Detect Asymptotes. It does Function, Parametric, Polar and Seq (Time
+     format) graphs, and the stat plots Scatter, xyLine, Histogram, Box,
+     ModBox and NormProb. It draws in float32 (0.2-1.1 s; the OS graph
+     1.5-7.5 s: X 0.3 s against 1.9, sin(X) 0.56 against 2.8, three functions
+     1.1 against 7.5). Anything it cannot compute (a function it does not
+     know, a list, `Ans`, an archived Yn) is handed to the OS parser for that
+     point, so the graph is still right, only slower; ON stops a slow draw. X and
+     Y (T, theta, R) are set as TI sets them, and `Ans` is untouched.
+     It hands the GRAPH key to TI's own graph when the screen is split, a
+     background image is on, a selected Yn has the line style
+     above/below/path/animate (in Par and Pol also the dot styles, in Seq
+     anything but dot), or TI has drawn on the graph (Circle(, Text(,
+     Tangent(, Pen, DrawF, Shade(, Pxl; it stays TI's until the window or an
+     equation changes). Also: in Seq mode the Web, uv, vw and uw formats, a
+     term that uses u, v or w other than as u(n-1), and any stat plot; any
+     stat plot SymCE cannot draw (a list that is not L1..L6, or one the OS
+     would raise an error for); ZoomFit in Par, Pol and Seq; and ZoomStat
+     with no plot on or with all the data equal.
+     Keys on the graph: an arrow shows TI's free cursor (X=, Y= in the bottom
+     bar); TRACE (also from home, Y= ...) traces the lowest selected function,
+     left/right step TraceStep and pan at the edge, up/down change function, a
+     digit opens the `X=` box, ENTER recentres (QuickZoom, ZPrevious works). With a
+     Scatter or xyLine plot on, TRACE walks its points; with a Histogram, Box,
+     ModBox or NormProb on, TRACE is TI's.
+     CLEAR and 2nd QUIT go home; Y=, WINDOW, MODE, FORMAT, TABLE, TBLSET and
+     GRAPH do what they do on TI. ZOOM and ZOOM MEMORY are TI's own menus;
+     every item but SetFactors (and ZoomStat in the cases above) zooms on SymCE's big graph with TI's
+     numbers: ZBox (ENTER, move, ENTER), Zoom In / Zoom Out (cursor, ENTER; XFact,
+     YFact), ZDecimal, ZSquare, ZStandard, ZTrig, ZInteger (cursor, ENTER),
+     ZoomFit, ZQuadrant1, ZFrac1/2 to 1/10, ZPrevious, ZoomSto, ZoomRcl. They work
+     from home too (while GRAPH is SYMCE) and when TI's graph is the fallback they
+     simply run TI's. 2nd CALC is TI's menu; its 7 items (value, zero, minimum,
+     maximum, intersect, dy/dx, integral) run on SymCE's big graph with TI's prompts and
+     numbers (errors like NO SIGN CHANGE are TI's); in Par and Pol the dy/dx, dy/dt,
+     dx/dt and dr/dtheta items too. 2nd DRAW from the grapher: ClrDraw, Line(,
+     Horizontal, Vertical, and Pt-On, Pt-Off, Pt-Change are SymCE's; Tangent(,
+     DrawF, Shade(, DrawInv, Circle(, Text(, Pen, Pxl- and STO are TI's. MATH, STAT, VARS, APPS and the other menu keys
+     open their menu over the home screen; CLEAR in such a menu comes back to the
+     graph, 2nd QUIT goes home. In an
+     out-of-window X= error, 2:Goto goes home (TI re-enters its graph). A RAM clear turns the key back to TI; press `4` to re-arm it.
    - `5` runs `prgmSYMCE` (the installer) from the app itself, so it works
      with no AsmHook2, even right after a RAM clear (the program is archived as
      sent, so it survives one). It needs free RAM about the size of the program
@@ -664,12 +696,13 @@ make -C symce emu   (your ROM, CEmu)
                                                      Geometry: MIDPOINT from the popup, DISTANCE from
                                                      the Geo tab, B 3 circle through 3 points, and the
                                                      Circle submenu closed leaving every pixel as it was)
-  lifecycle.py                         ALL PASS     (install, settings keys 1 2 3, the 4: Graph row and 5: Run prgmSYMCE with no AsmHook2, RAM clear, re-arm, another app deleted, re-install)
+  lifecycle.py                         ALL PASS     (install, settings keys 1 2 3, 4: GRAPH key SYMCE/TI (TI's graph when off) and 5: Run prgmSYMCE with no AsmHook2, RAM clear, re-arm, another app deleted, re-install)
   graph_check.py (in make check)      ALL PASS     (the grapher's float32 evaluator against Python math: 60 named
                                                      cases, degree mode, unsupported/syntax/long/deep, 300 random trees)
-  graph.py                             ALL PASS     (4: Graph on the real ROM: sin(X) and X^2/5 within +-1 row of
-                                                     round((Ymax-f)/(Ymax-Ymin)*219) at 10 columns each; draws in
-                                                     0.4-2.6 s where the OS graph takes 1.5-7.5 s)
+  graph.py                             ALL PASS     (the GRAPH key on the real ROM: sin(X) and X^2/5 within +-1 row of
+                                                     round((Ymax-f)/(Ymax-Ymin)*219) at 10 columns each; GRAPH from
+                                                     Y= mid-edit and from WINDOW plots; CLEAR and 2nd MODE go home
+                                                     with CAS answering; draws 5-7x faster than the OS graph: X 300 ms against 1864, sin 560 against 2804, X^2 280 against 1624, sin(X)/X+cos(3X) 880 against 5740, three functions 1120 against 7480)
   engine_device.py                     ALL MATCH    (2131 vectors, 55,490 bytes in 2 programs, Calculus,
                                                      Geometry and DEGREE included: the calculator's
                                                      engine gives the host's bytes)

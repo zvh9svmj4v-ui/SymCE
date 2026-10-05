@@ -26,8 +26,8 @@
 ; app, relocates it and turns the hook on; rerunning it is how to upgrade.
 ; After that, opening SymCE from APPS shows its settings: 1 turns CAS on/off
 ; (also how to turn it back on after a RAM clear, which keeps the app and the
-; appvars), 2 picks the insert or TI cursor, 3 the Evo or TI font, 4 runs the
-; grapher, 5 runs prgmSYMCE, so an upgrade needs no AsmHook2.
+; appvars), 2 picks the insert or TI cursor, 3 the Evo or TI font, 4 switches the GRAPH
+; key between SymCE's grapher and TI's, 5 runs prgmSYMCE, so an upgrade needs no AsmHook2.
 ;
 ; make PAD=n pads the app to n bytes with dead ones, to test all this over 64 KB.
 ;
@@ -194,8 +194,12 @@ appMain:
 .fontV:
     ld hl, fontLbl
     call row
-    ld de, nullVal
-    ld hl, graphLbl
+    call gkeyIsOn
+    ld de, symceVal
+    jq z, .gkeyV
+    ld de, tiVal
+.gkeyV:
+    ld hl, gkeyLbl
     call row
     ld de, nullVal
     ld hl, runLbl
@@ -214,7 +218,17 @@ appMain:
     jq z, .run
     cp a, ti.k4
     jq nz, .exit
-    call graphMain
+    call gkeyIsOn
+    jq nz, .gkeySet
+    call gkeyClr
+    call casIsOn
+    call nz, mhookClr                   ; the menu hook stays while the CAS needs it
+    jq .screen
+.gkeySet:
+    ld hl, symce_khook
+    call ti.SetGetKeyHook               ; arms the RAW KEY hook despite its name
+    ld hl, symce_mhook                  ; ZOOM picks are the menu hook's
+    call ti.SetMenuHook
     jq .screen
 .run:
     call runPrgm                        ; returns only on failure, HL = why
@@ -254,11 +268,8 @@ appMain:
 .clrHs:
     call ti.ClrHomescreenHook
 .noHs:
-    ld hl, (ti.menuHookPtr)
-    ld de, symce_mhook
-    or a, a
-    sbc hl, de
-    call z, ti.ClrMenuHook
+    call gkeyIsOn
+    call nz, mhookClr                   ; the menu hook stays while the GRAPH key needs it
     jq .screen
 .cursor:
     call casIsOn
@@ -370,6 +381,14 @@ row:
     call ti.PutS
     jp ti.NewLine
 
+mhookClr:                               ; clear the menu hook if it is ours
+    ld hl, (ti.menuHookPtr)
+    ld de, symce_mhook
+    or a, a
+    sbc hl, de
+    ret nz
+    jp ti.ClrMenuHook
+
 ; CAS is on when the homescreen hook is either body of ours and enabled.
 casIsOn:                                ; Z if on
     ld hl, (ti.homescreenHookPtr)
@@ -432,21 +451,148 @@ fontSet:
     ld hl, symce_lhook
     jp ti.SetLocalizeHook
 
+; The GRAPH key is the raw key hook: the OS's main loop hands it every key it
+; reads (ROM 0x8C482), before a context key like GRAPH switches screens. "On" is
+; our pointer in that slot with its enable bit set.
+gkeyIsOn:                               ; Z if on
+    ld hl, (ti.rawKeyHookPtr)
+    ld de, symce_khook
+    or a, a
+    sbc hl, de
+    ret nz
+    ld a, (iy + ti.hookflags2)
+    cpl
+    and a, 1 shl ti.rawKeyHookActive
+    ret
+
+gkeyClr:
+    ld hl, (ti.rawKeyHookPtr)
+    ld de, symce_khook
+    or a, a
+    sbc hl, de
+    ret nz
+    jp ti.ClrRawKeyHook
+
 ; The grapher (src/graph.c). Its work struct lives in the engine's RAM (see the
 ; layout at `struct gw`); this fills the inputs from the OS, then calls
 ; symce_graph(w, key) with key 0 and after each key until it returns 1. Keys come from
 ; GetCSC (GetKey would draw the battery icon over the plot); a held arrow repeats.
 GW := 0D0EF00h
-GWN := GW + 900h                        ; loop scratch, past the struct
-GWD := GW + 901h                        ; also the last key sent, once the setup is over
-GWS := GW + 904h                        ; 1 after 2nd, for 2nd MODE
-GWR := GW + 905h                        ; 1 once the held arrow is repeating, 0 on a fresh press
+GWN := GW + 0C00h                       ; setup scratch, past the struct (GW is cleared up to here)
+GWD := GW + 0C01h                       ; 3 bytes
+GWT := GW + 0C04h                       ; 3 bytes: timer 1's control word, put back on the way out
+GWS := GW + 0C07h                       ; the key that opened the grapher (GRAPH or TRACE)
+GWA := GW + 0C08h                       ; menu pick for the grapher's first key: a zoom action 1..21, 0 plain, 0FEh = only check
+GWK := GW + 0C0Ah                       ; GWA, taken by graphMain0
+GWC := GW + 0C0Bh                       ; 3 bytes: the home cursor (curRow, curCol), put back when a menu pick leaves
+GWB := GW + 0C10h                       ; the equations' first name byte (5E 10 Y1, 20 X1T, 40 r1) and how many slots (10, 12, 6)
+GWQ := GW + 0C11h
+GWM := GW + 0C0Eh                       ; 0A5h 5Ah: a menu opened from the grapher is up (CLEAR there comes back). This RAM is
+                                        ; shared scratch (the CAS menu, the engine, programs): a stale byte must not read as set
 
+; The cursor's blink and a held arrow's repeats are timed with timer 1 at 32768 Hz
+; (the OS's own tick is timer 3; timer 1 is the toolchain's clock()). Its control
+; word is saved here and put back whichever way the grapher is left.
+; The grapher stores X, Y (T; theta, R) as it draws. CreateReal under the live home screen, with an entry
+; of 2..6 tokens and no history, left the OS state the next Y=/WINDOW/MODE put-away trips on (reset). TI creates
+; them from its own graph context, home put away: do that, only when one is missing.
 graphMain:
+    ld a, (GWA)
+    cp a, 0FEh                          ; only asks graph_fall: nothing to make, home stays as it is
+    jq z, graphMain1
+    cp a, 0FDh                          ; the same, for a DRAW pick
+    jq z, graphMain1
+    call graphNeed
+    jq c, .put
+    jq graphMain1
+.put:
+    ld hl, (GWC)                        ; the home cursor as it was before a menu (CALC, ZOOM) moved it: the put-away files this one
+    ld (ti.curRow), hl
+    ld a, ti.kMode
+    call ti.NewContext0
+    ld iy, ti.flags
+    call graphMain1
+    push af
+    ld a, ti.kQuit
+    call ti.NewContext0
+    ld iy, ti.flags
+    pop af
+    ret
+
+graphNeed:                              ; C: a variable the grapher may store does not exist yet
+    ld a, 58h
+    call .chk
+    ret c
+    ld a, 59h
+    call .chk
+    ret c
+    ld a, (0D00082h)                    ; grfModeFlags: Par 40h, Pol 20h
+    bit 6, a
+    jq z, .nopar
+    ld a, 54h
+    call .chk
+    ret c
+.nopar:
+    ld a, (0D00082h)
+    bit 5, a
+    jq nz, .rt
+    ld a, (0D00084h)                    ; grfDBFlags bit 3: PolarGC stores R and theta too
+    bit 3, a
+    jq z, .no
+.rt:
+    ld a, 5Bh
+    call .chk
+    ret c
+    ld a, 52h
+.chk:
+    ld hl, ti.OP1
+    ld (hl), 0
+    inc hl
+    ld (hl), a
+    inc hl
+    ld (hl), 0
+    inc hl
+    ld (hl), 0
+    jp ti.ChkFindSym                    ; C: not found
+.no:
+    or a, a
+    ret
+
+graphMain1:
+    ld hl, (0F20030h)
+    ld (GWT), hl
+    ld a, l
+    and a, 0F8h                         ; stop it: enable, clock and interrupt bits off ...
+    ld l, a
+    ld a, h
+    and a, 0FDh                         ; ... and count down
+    ld h, a
+    ld (0F20030h), hl
+    ld hl, 0
+    ld (0F20000h), hl                   ; from zero
+    xor a, a
+    ld (0F20003h), a
+    ld hl, (0F20030h)
+    set 0, l                            ; enable
+    set 1, l                            ; the 32768 Hz clock
+    set 1, h                            ; count up
+    ld (0F20030h), hl
+    call graphMain0
+    push af
+    ld hl, (GWT)
+    ld (0F20030h), hl
+    pop af
+    ret
+
+graphMain0:
+    ld a, (GWA)
+    ld (GWK), a
+    xor a, a
+    ld (GWA), a
     ld hl, GW
     ld (hl), 0
     ld de, GW + 1
-    ld bc, 2047
+    ld bc, 0BFFh
     ldir
     ld hl, ti.Xmin                      ; Xmin, Xmax, then Ymin, Ymax: 9-byte reals
     ld de, GW
@@ -460,17 +606,52 @@ graphMain:
     ld a, 1
     ld (GW + 36), a
 .rad:
-    ld hl, ti.y1LineColor
-    ld de, GW + 37
+    ld hl, ti.y1LineColor               ; Func: Y1..Y0, 10 colours
     ld bc, 10
+    ld a, 10h
+    ld (GWB), a
+    ld a, 10
+    ld (GWQ), a
+    ld a, (0D00082h)                    ; grfModeFlags: Par 40h, Pol 20h
+    bit 6, a
+    jq z, .notPar
+    ld hl, ti.para1LineColor            ; Par: X1T Y1T .. X6T Y6T (12 slots), a colour per pair
+    ld bc, 6
+    ld a, 20h
+    ld (GWB), a
+    ld a, 12
+    ld (GWQ), a
+    jq .colset
+.notPar:
+    bit 5, a
+    jq z, .notPol
+    ld hl, ti.polar1LineColor           ; Pol: r1..r6
+    ld bc, 6
+    ld a, 40h
+    ld (GWB), a
+    ld a, 6
+    ld (GWQ), a
+    jq .colset
+.notPol:
+    bit 7, a
+    jq z, .colset
+    ld hl, ti.secULineColor             ; Seq: u v w (5E 80..82), 3 colours
+    ld bc, 3
+    ld a, 80h
+    ld (GWB), a
+    ld a, 3
+    ld (GWQ), a
+.colset:
+    ld de, GW + 37
     ldir
     xor a, a
     ld (GWN), a
-    ld hl, GW + 300
+    ld hl, GW + 304
     ld (GWD), hl
-.eq:                                    ; Y1..Y0 are 5E 10..19
-    ld a, (GWN)
-    add a, 10h
+.eq:                                    ; Y1..Y0 are 5E 10..19, X1T..Y6T 5E 20..2B, r1..r6 5E 40..45
+    ld a, (GWB)
+    ld hl, GWN
+    add a, (hl)
     ld hl, ti.OP1
     ld (hl), ti.EquObj
     inc hl
@@ -506,7 +687,7 @@ graphMain:
     ld a, (GWN)
     ld de, 0
     ld e, a
-    ld hl, GW + 47
+    ld hl, GW + 49
     add hl, de
     pop af
     ld (hl), a                          ; len[i]; over 96 graph.c calls too long
@@ -527,11 +708,12 @@ graphMain:
     ld a, (GWN)
     inc a
     ld (GWN), a
-    cp a, 10
+    ld hl, GWQ
+    cp a, (hl)
     jq nz, .eq
     xor a, a
     ld (GWN), a
-    ld hl, GW + 57
+    ld hl, GW + 61
     ld (GWD), hl
 .var:                                   ; A..Z, theta: real vars 00 41..5B
     ld a, (GWN)
@@ -560,10 +742,30 @@ graphMain:
     ld (GWN), a
     cp a, 27
     jq nz, .var
-    xor a, a
-    ld (GWS), a
-.loop:                                  ; A = key: 0 first draw, else graph.c's K_ code
-    ld (GWD), a
+    ld hl, GW
+    push hl
+    call symce_graph + 4                ; NZ: the OS draws this graph (a mode or stat plot it cannot)
+    pop hl
+    ld iy, ti.flags
+    or a, a
+    jq z, .mine
+    ld a, 0FFh
+    ret
+.mine:
+    ld a, (GWK)
+    cp a, 0FEh
+    jq z, .chk
+    cp a, 0D0h                          ; 0D0h + action = the same check, for a ZOOM pick
+    jq c, .go
+.chk:
+    xor a, a                            ; only the fallback check was asked for
+    ret
+.go:
+    res ti.onInterrupt, (iy + ti.onFlags)   ; a stale ON must not stop the first draw
+    or a, a
+    jq z, .loop
+    add a, 0C0h                         ; a zoom: the grapher's first key (draws first when it has to)
+.loop:                                  ; A = 0 first draw, else a GetCSC scan code
     ld hl, 0
     ld l, a
     push hl
@@ -574,109 +776,29 @@ graphMain:
     pop hl
     ld iy, ti.flags                     ; C clobbers IY
     or a, a
-    ret nz
-    ld hl, ti.vRam + 220 * 640          ; the bar below the plot: white, black text
-    ld (hl), 0FFh
-    push hl
-    pop de
-    inc de
-    ld bc, 20 * 640 - 1
-    ldir
-    xor a, a
-    ld (ti.drawFGColor), a
-    ld (ti.drawFGColor + 1), a
-    ld (ti.penRow + 1), a
-    ld (ti.penCol + 1), a
+    jq z, .poll                         ; stay
+    push af
+    call 021A3Ch                        ; DrawStatusBar: the big graph covered it; every exit below (home, Y=, a menu ...) must start from a whole bar
+    ld iy, ti.flags
+    pop af
     dec a
-    ld (ti.drawBGColor), a
-    ld (ti.drawBGColor + 1), a
-    ld a, 224
-    ld (ti.penRow), a
-    ld a, 2
-    ld (ti.penCol), a
-    ld hl, GW + 1260
-    call ti.VPutS
-    call .held                          ; a held arrow (K_ 1..4) pans again
-    jq z, .poll
-    ld a, (GWR)                         ; a fresh press waits 300 ms first, so a tap pans once
-    or a, a
-    jq nz, .again
+    ret z                               ; 1: home (A = 0)
     inc a
-    ld (GWR), a
-    ld b, 30
-.wait:
-    push bc                             ; Delay10ms may clobber BC
-    call ti.Delay10ms
-    call .held
-    pop bc
-    jq z, .poll                         ; let go: no pan
-    djnz .wait
-.again:
-    call ti.GetCSC                      ; drop the press this repeat stands for
-    ld a, (GWD)
-    jq .loop
+    ret                                 ; an OS key for the caller to send
 .poll:                                  ; ponytail: no APD in here, like the menu's loop
+    ld a, (GWS)                         ; TRACE opened the grapher: start tracing once it is drawn
+    cp a, ti.kTrace
+    jq nz, .key
+    xor a, a
+    ld (GWS), a
+    ld a, 0FEh
+    jq .loop
+.key:
     call ti.GetCSC
     or a, a
-    jq z, .poll
-    ld c, a
-    xor a, a
-    ld (GWR), a                         ; a new press: its repeat starts with the wait
-    ld a, c
-    cp a, ti.sk2nd
-    jq nz, .not2nd
-    ld a, 1
-    ld (GWS), a
-    jq .poll
-.not2nd:
-    ld b, a
-    ld a, (GWS)
-    ld c, a
-    xor a, a
-    ld (GWS), a
-    ld a, b
-    cp a, ti.skMode
-    jq nz, .map
-    ld a, c                             ; MODE alone is nothing; 2nd MODE is QUIT
-    or a, a
-    jq z, .poll
-    ld a, 40h
+    jq nz, .loop
+    ld a, 0FFh                          ; no key: the blink and the repeats
     jq .loop
-.map:
-    ld hl, scanMap
-.m:
-    ld a, (hl)
-    or a, a
-    jq z, .poll                         ; not a viewer key
-    inc hl
-    cp a, b
-    ld a, (hl)
-    inc hl
-    jq nz, .m
-    jq .loop
-
-.held:                                  ; NZ if the arrow in GWD is down
-    ld a, (GWD)
-    dec a
-    cp a, 4
-    jq c, .arrow
-    xor a, a                            ; not an arrow: Z
-    ret
-.arrow:
-    ld hl, arrowBit
-    ld de, 0
-    ld e, a
-    add hl, de
-    ld a, (0F5001Eh)                    ; keypad group 7: bit set = down
-    and a, (hl)
-    ret
-
-; GetCSC scan code, graph.c K_ code
-scanMap:
-    db ti.skRight, 1, ti.skLeft, 2, ti.skUp, 3, ti.skDown, 4, ti.skClear, 9
-    db ti.skAdd, 80h, ti.skSub, 81h, ti.sk0, 8Eh, 0
-arrowBit:                               ; group 7 bits for K_RIGHT, LEFT, UP, DOWN
-    db 4, 2, 8, 1
 
 ; Print zero-terminated lines until an empty one.
 appLines:
@@ -709,8 +831,8 @@ curLbl:
     db "2: Cursor      ", 0
 fontLbl:
     db "3: Font        ", 0
-graphLbl:
-    db "4: Graph", 0
+gkeyLbl:
+    db "4: GRAPH key   ", 0
 runLbl:
     db "5: Run prgmSYMCE", 0
 nullVal:
@@ -740,6 +862,8 @@ tiVal:
     db "        TI", 0
 evoVal:
     db "       EVO", 0
+symceVal:
+    db "     SYMCE", 0
 
 ; Built from src/hook.c by the makefile. Position independent: it finds itself
 ; through homescreenHookPtr, so it needs no relocation entries.
@@ -757,9 +881,149 @@ symce_hook_ti:
     dl symce_engine
     dl symce_menu
     db 1
-; The menu hook, src/mhook.c, for the SymCE tab in 2nd MATH: the same, and its
-; word is menu.c's second entry point, menu_tab.
+; The menu hook: ZOOM picks go to the grapher while the GRAPH key is SymCE's, and
+; everything else to the CAS's SymCE tab in 2nd MATH while the CAS is on. Armed
+; whenever either is.
 symce_mhook:
+    db 83h
+    cp a, 3
+    jq z, menuKey
+    cp a, 4
+    jq nz, .nc
+    push hl
+    ld hl, (ti.curRow)                  ; a menu opens: the home cursor, before the menu moves it
+    ld (GWC), hl
+    pop hl
+.nc:
+    push hl
+    push de
+    push af
+    call casIsOn
+    jq nz, .off
+    pop af
+    pop de
+    pop hl
+    ld ix, symce_mhook_cas + 1          ; the shim finds menu_tab through ix, as the OS sets it
+    jp symce_mhook_cas + 1
+.off:
+    pop af
+    pop de
+    pop hl
+    cp a, a
+    ret
+
+; A = 3, B = the key. CLEAR in a menu opened from the grapher goes back to it; a pick in the ZOOM
+; menu (ENTER, a digit, a letter) is done on the grapher unless TI's graph has to
+; draw (mode, stat plot ...), the item is ZoomStat or SetFactors, or the GRAPH key is TI's.
+; Never returns NZ: the grapher ends in JForceCmd, the rest is the OS's (Z).
+menuKey:
+    push hl
+    push de
+    push bc
+    push af
+    ld a, b
+.pick:
+    call gkeyIsOn
+    jq nz, .no
+    ld a, (ti.menuCurrent)
+    cp a, 4
+    jq nz, .no
+    ld a, b
+    cp a, 0FBh
+    jq nz, .tab
+    ld a, (ti.keyExtend)                ; ZQuadrant1 and the ZFracs are FB C0..C6
+    sub a, 0C0h
+    cp a, 7
+    jq nc, .no
+    add a, 11
+    jq .run
+.tab:
+    ld hl, zkeys                        ; the item's key code, the same whether ENTER or a number picked it
+.zl:
+    ld a, (hl)
+    or a, a
+    jq z, .no                           ; ZoomStat, SetFactors, anything else: the OS's
+    inc hl
+    cp a, b
+    ld a, (hl)
+    inc hl
+    jq nz, .zl
+.run:
+    push af
+    add a, 0D0h
+    ld (GWA), a
+    call graphMain                      ; only asks graph_fall
+    ld iy, ti.flags
+    cp a, 0FFh
+    jq nz, .go
+    pop af
+    jq .no
+.go:
+    ld a, ti.kQuit
+    call ti.NewContext0                 ; leave the menu, Y=, WINDOW ... first (khook's cx test is for no menu)
+    ld iy, ti.flags
+    res ti.indicRun, (iy + ti.indicFlags)
+    pop af
+    ld (GWA), a
+    xor a, a
+    ld (GWS), a                         ; a TRACE press the OS answered must not start one here
+    call graphMain
+    ld iy, ti.flags
+    ld hl, 0D0265Bh                     ; the OS counts hook calls in here and will never see this one return
+    dec (hl)
+    set 5, (iy + 17)                    ; the OS's menu-closed flags (measured at home); else it keeps treating keys as menu keys
+    set 0, (iy + 38)
+    ld hl, (GWC)
+    ld (ti.curRow), hl
+    ld hl, 010000h
+    ld (0D00824h), hl                   ; menuCurrent/Sub off
+    or a, a
+    jp z, ti.JForceCmdNoChar            ; home
+    cp a, 0FFh
+    jq nz, .key
+    xor a, a
+    jp ti.JForceCmdNoChar
+.key:
+    call setMark
+    ld sp, (0D007FAh)                   ; the monitor's stack, as JForceCmd does
+    res 1, (iy + 40)
+    res 2, (iy + 40)
+    jp 08C49Fh                          ; the monitor's key dispatch, A = the key: as if the raw key hook returned it (JForceCmd takes a token, not a key)
+.no:
+    pop af
+    pop bc
+    pop de
+    pop hl
+    cp a, a
+    ret
+
+; DRAW menu item -> the grapher's pick (D_* in graph_draw.h), 0 = not on the grapher: DRAW tab, POINTS tab
+dtab0:
+    db 1, 2, 3, 4, 0, 0, 0, 0, 0, 0, 0
+dtab1:
+    db 9, 10, 11, 0, 0, 0, 0, 0, 0, 0, 0
+
+
+; key code, action: ZBox ZoomIn ZoomOut ZDecimal ZSquare ZStandard ZTrig ZInteger ZoomStat ZoomFit | ZPrevious ZoomSto ZoomRcl
+zkeys:
+    db 5Fh, 1, 5Ch, 2, 5Dh, 3, 60h, 4, 62h, 5, 63h, 6, 64h, 7, 67h, 8, 68h, 9, 5Bh, 10, 5Eh, 18, 66h, 19, 65h, 20, 0
+
+; A = a key the grapher hands to the OS: a menu key (2Bh..3Ch) arms the CLEAR marker.
+setMark:
+    push af
+    sub a, 2Bh
+    cp a, 12h
+    jq nc, .n
+    ld a, 0A5h
+    ld (GWM), a
+    ld a, 5Ah
+    ld (GWM + 1), a
+.n:
+    pop af
+    ret
+
+; The CAS's tab, src/mhook.c: a shim into menu.c's menu_tab, whose address is the word after it.
+symce_mhook_cas:
     file '../obj/hook/mhook.bin'
     dl symce_menu + 4
 
@@ -777,10 +1041,227 @@ symce_lhook:
     dl font_small - 25
 include '../obj/font.inc'
 
+; The raw key hook body. Like the others it lives in the app (the OS resets the
+; calculator at a context switch if an armed hook points outside flash). The OS
+; jumps to the byte after the 83h with A = the key and takes A back as the key
+; to process. GRAPH opens SymCE's grapher in place of TI's; the rest goes on.
+symce_khook:
+    db 83h
+    push bc
+    ld b, a                             ; the key
+    ld a, (ti.menuCurrent)
+    cp a, 11h                           ; 2nd CALC (from the grapher, home, Y= ...; the menu hook never sees its picks)
+    jq z, .calcmenu
+    cp a, 3Ah                           ; its Par (3Ah) and Pol (3Bh) menus
+    jq z, .calcmenu
+    cp a, 3Bh
+    jq z, .calcmenu
+    cp a, 3Ch                           ; and Seq's (3Ch, one item: value)
+    jq z, .calcmenu
+    cp a, 5                             ; 2nd DRAW, opened from the grapher (from home it pastes: the OS's)
+    jq z, .drawmenu
+    or a, a
+    jq nz, .nomenu
+    ld a, b
+    cp a, ti.kCalc                      ; the menu is about to open: the home cursor, before it moves it (the menu hook's event 4 does this for ZOOM)
+    jq nz, .nomenu
+    push hl
+    ld hl, (ti.curRow)
+    ld (GWC), hl
+    pop hl
+    jq .nomenu
+.calcmenu:
+    ld a, b
+    cp a, ti.kEnter
+    jq nz, .dig
+    ld a, (0D00826h)                    ; the highlighted item, 0 based
+    inc a
+    jq .cpick
+.dig:
+    sub a, ti.k1
+    jq c, .nomenu
+    ld c, 7                             ; the menu's items: 7, Par 4, Pol 3
+    push af
+    ld a, (0D00082h)
+    bit 6, a
+    jq z, .np
+    ld c, 4
+.np:
+    bit 5, a
+    jq z, .nq
+    ld c, 3
+.nq:
+    bit 7, a
+    jq z, .ns
+    ld c, 1
+.ns:
+    pop af
+    cp a, c
+    jq nc, .nomenu
+    inc a
+.cpick:
+    add a, 20h                          ; the grapher's first key is 0C0h + this: 0E1h..0E7h
+    push af
+    ld a, 0FEh
+.probe:
+    ld (GWA), a
+    call graphMain                      ; only asks graph_fall
+    ld iy, ti.flags
+    cp a, 0FFh
+    jq nz, .cgo
+    pop af                              ; TI's own CALC
+    ld a, b
+    pop bc
+    ret
+.cgo:
+    ld a, ti.kQuit
+    call ti.NewContext0                 ; leave the menu first, as the ZOOM picks do
+    ld iy, ti.flags
+    res ti.indicRun, (iy + ti.indicFlags)
+    pop af
+    ld (GWA), a
+    xor a, a
+    ld (GWS), a
+    call graphMain
+    ld iy, ti.flags
+    set 5, (iy + 17)                    ; the OS's menu-closed flags
+    set 0, (iy + 38)
+    ld hl, (GWC)
+    ld (ti.curRow), hl
+    ld hl, 010000h
+    ld (0D00824h), hl                   ; menuCurrent/Sub off
+    or a, a
+    jp z, ti.JForceCmdNoChar            ; home
+    cp a, 0FFh
+    jq nz, .ckey
+    xor a, a
+    jp ti.JForceCmdNoChar
+.ckey:
+    call setMark
+    ld sp, (0D007FAh)
+    res 1, (iy + 40)
+    res 2, (iy + 40)
+    jp 08C49Fh
+.drawmenu:
+    ld a, (GWM)
+    cp a, 0A5h
+    jq nz, .nomenu
+    ld a, (GWM + 1)
+    cp a, 5Ah
+    jq nz, .nomenu
+    ld a, b
+    cp a, ti.kEnter
+    jq nz, .ddig
+    ld a, (0D00826h)                    ; the highlighted item, 0 based
+    inc a
+    jq .dtab
+.ddig:
+    sub a, ti.k0                        ; 0..9 (k0..k9 are consecutive); 0 is item 10
+    jq c, .nomenu
+    cp a, 10
+    jq nc, .nomenu
+    or a, a
+    jq nz, .dtab
+    ld a, 10
+.dtab:                                  ; A = the item, 1 based; the tab (0 DRAW, 1 POINTS, 2 STO) is at 0D00825h
+    dec a
+    cp a, 11
+    jq nc, .nomenu
+    ld hl, dtab0
+    ld de, 0
+    ld e, a
+    ld a, (0D00825h)
+    or a, a
+    jq z, .dlook
+    dec a
+    jq nz, .nomenu                      ; STO: the OS's
+    ld hl, dtab1
+.dlook:
+    add hl, de
+    ld a, (hl)                          ; the grapher's pick, 0 = the OS does it (DrawF, Shade(, Pxl-On( ... paste to home)
+    or a, a
+    jq z, .nomenu
+    add a, 30h                          ; the grapher's first key is 0C0h + this: 0F1h..0FBh
+    push af
+    ld a, 0FDh
+    jq .probe
+.nomenu:
+    ld a, b
+    pop bc
+    cp a, ti.kClear
+    jq nz, .nc
+    ld a, (GWM)
+    cp a, 0A5h
+    jq nz, .clr
+    ld a, (GWM + 1)
+    cp a, 5Ah
+    jq nz, .clr
+    ld a, (ti.menuCurrent)              ; and an OS menu really is up
+    or a, a
+    jq z, .clr
+    xor a, a
+    ld (GWM), a
+    ld a, ti.kGraph                     ; CLEAR out of a menu the grapher opened: back to the grapher
+    jq .open
+.clr:
+    ld a, ti.kClear
+    jq .mk                              ; CLEAR keeps the marker (the arrows too): it is the menu's own
+.nc:
+    dec a
+    cp a, 4
+    inc a
+    jq c, .mk
+    push af
+    xor a, a
+    ld (GWM), a                         ; any other key: whatever menu was up is not "from the grapher" any more
+    pop af
+.mk:
+    cp a, ti.kGraph
+    jq z, .open
+    cp a, ti.kTrace
+    ret nz
+.open:
+    ld (GWS), a                         ; GW's setup bytes are free outside the grapher
+    ld a, (ti.menuCurrent)
+    or a, a
+    ld a, (GWS)
+    jq nz, .nosave
+    ld hl, (ti.curRow)                  ; GRAPH from home: the cursor 2nd CALC's errors and ENTER give back (no menu hook runs for it)
+    ld (GWC), hl
+.nosave:
+    ld a, (ti.cxCurApp)
+    cp a, ti.kExtApps                   ; flash apps and up: theirs
+    jq nc, .os
+    cp a, ti.kPrgmInput                 ; a program's Input: the OS keeps it
+    jq z, .os
+    cp a, ti.kError                     ; the ERR screen ignores GRAPH
+    jq z, .os
+    cp a, ti.kQuit
+    jq z, .home
+    ld a, ti.kQuit                      ; leave Y=, WINDOW, ... first: its putaway
+    call ti.NewContext0                 ; files an equation still being edited
+.home:
+    xor a, a
+    ld (GWA), a                         ; graphMain0 takes this as the first key: RAM nobody wrote to is not a zoom
+    res ti.indicRun, (iy + ti.indicFlags)   ; the monitor set the busy dots; they'd spin over the plot
+    call graphMain                      ; A = 0 home, 0FFh the OS graphs this, else an OS key to send
+    or a, a
+    jp z, ti.JForceCmdNoChar            ; home, redrawn, as CLEAR from TI's graph
+    cp a, 0FFh
+    jq z, .fall
+    jp setMark                          ; the key the user pressed on the graph (Y=, WINDOW ...): the OS does it from home
+.fall:
+    ld a, (GWS)                         ; from home: TI's graph, or TI's TRACE
+    ret
+.os:
+    ld a, (GWS)
+    ret
+
 hook_rel := symce_hook - appMain
 mhook_rel := symce_mhook - appMain
 fhook_rel := symce_fhook - appMain
 lhook_rel := symce_lhook - appMain
+khook_rel := symce_khook - appMain
 
 ; src/engine.c and src/menu.c, each linked on its own; every absolute address
 ; in them is a `dl` that app_create relocates, generated by tools/relocs.py.

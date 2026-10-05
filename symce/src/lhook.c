@@ -3,8 +3,8 @@
  * seen) and for glyphs: A = 0x75 the small glyph (Load_Sfont 0xA55D3, B = display
  * index, HL = B*25), 0x76 a large glyph the font hook passed on, 0x77 a small
  * width. Only 0x75 is answered: the record (width byte, then 24 glyph bytes) goes
- * to 0xD005C5 and Z with HL = 0xD005C5 says "use this". Everything else is NZ and
- * untouched. Widths are TI's, so the 0x77 query and the drawn advance agree.
+ * to 0xD005C5 and Z with HL = 0xD005C5 says "use this". Event 0x0A gets HL = (HL), what the
+ * OS does with no hook; everything else is NZ and untouched. Widths are TI's, so the 0x77 query and the drawn advance agree.
  *
  * Position independent, and laid out as fhook.c: the two words past the body are
  * font_map and the small records less one record.
@@ -17,7 +17,12 @@ __asm__(
 "_symce_loc:\n"
 "\t.byte\t0x83\n"
 "\tcp\ta, 0x75\n"
-"\tret\tnz\n"
+"\tjr\tz, .Lglyph\n"
+"\tcp\ta, 0x0A\n"                       /* the OS's menu-name fetch (0x7BB8B) goes on with whatever HL the hook leaves: */
+"\tret\tnz\n"                           /* the default is HL = (HL), so do that (2nd CALC drew 3-root for every row) */
+"\tld\thl, (hl)\n"
+"\tret\n"
+".Lglyph:\n"
 "\tpush\thl\n"
 "\tpush\tde\n"
 "\tpush\tbc\n"

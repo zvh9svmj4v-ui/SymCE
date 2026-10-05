@@ -6,6 +6,7 @@
   * opening the app from APPS changes nothing; on its screen 1 turns CAS off and on
   * 2 arms the TI-cursor copy of the hook and back; the cursor shows in textFlags
   * the settings screen's rows show the values
+  * 4 switches the GRAPH key (raw key hook) between SymCE's grapher and TI's
   * a RAM clear drops the hook; APPS > SymCE > 1 re-arms it
   * running the installer again replaces the app (RAM clear or not) and arms it
   * the installer deletes v15's leftover appvars SYMCEHK and SYMCEPV
@@ -54,6 +55,7 @@ def prologue_keys(keys):
 def state(keys, files=FILES, prologue=PROLOGUE):
     r = screen.read([("hookptr", 0xD025E1, 3), ("flag", 0xD000B4, 1),
                      ("ptemp", 0xD0259A, 3), ("ops", 0xD02593, 3), ("fps", 0xD0258D, 3), ("asz", 0xD0118C, 3), ("mhook", 0xD02608, 3), ("hf4", 0xD000B6, 1), ("tf", 0xD00085, 1),
+                     ("kptr", 0xD025DB, 3), ("cx", 0xD007E0, 1),
                      ("screen", screen.TEXTSHADOW, screen.COLS * screen.ROWS)],
                     keys=prologue + keys, files=files, launch=LAUNCH, lead=False)
     raw = [r["screen"][i * screen.COLS:(i + 1) * screen.COLS] for i in range(screen.ROWS)]
@@ -66,6 +68,9 @@ def state(keys, files=FILES, prologue=PROLOGUE):
         return state("w100 " + keys, files, prologue)
     # the menu hook's pointer while it is armed (hookflags4 bit 6), else 0
     state.tf = r["tf"][0]
+    state.kptr = int.from_bytes(r["kptr"], "little")     # the raw key hook: GRAPH
+    state.kon = bool(r["flag"][0] & 0x20)
+    state.cx = r["cx"][0]                                   # cxCurApp: 40 home, 44 TI's graph
     state.free = int.from_bytes(r["ops"], "little") - int.from_bytes(r["fps"], "little")
     state.asz = int.from_bytes(r["asz"], "little")
     state.menu = int.from_bytes(r["mhook"], "little") if r["hf4"][0] & 0x40 else 0
@@ -91,9 +96,12 @@ def main():
         return all(l in got for l in lines)
 
     ptr, flag, _, rows = state(SETTINGS)
-    check("settings screen", shows(rows, "SymCE settings", "1: CAS ON", "2: Cursor INSERT", "3: Font EVO", "4: Graph",
+    check("settings screen", shows(rows, "SymCE settings", "1: CAS ON", "2: Cursor INSERT", "3: Font EVO", "4: GRAPH key SYMCE",
                                 "5: Run prgmSYMCE", "Press 1-5, CLEAR exits."),
           "rows=%s" % rows)
+
+    kptr0 = state.kptr
+    check("install arms GRAPH key", state.kon and 0x0BD869 < kptr0 < 0x3B0000, "rawKeyHookPtr=%06X" % kptr0)
 
     px, _ = vram.grab(prologue_keys(SETTINGS), 0, 240, 1, 1, files=FILES, launch=LAUNCH, lead=False)
     os.makedirs(os.path.join(screen.HERE, "_png"), exist_ok=True)
@@ -104,11 +112,28 @@ def main():
     check("opening changes nothing", ptr == ptr0 and flag & 0x10 and "4X" in rows and state.menu == m0,
           "flag=%02X rows=%s" % (flag, rows[-2:]))
 
+    # Key 4: GRAPH goes to SymCE's grapher (it returns to the home screen, cxCurApp
+    # 0x40) or to TI's (0x44); the flag and pointer are the raw key hook's.
+    state("graph . . ")
+    check("GRAPH: ours", state.kon and state.cx == 0x40, "cxCurApp=%02X" % state.cx)
+    ptr, flag, _, rows = state(SETTINGS + "4 . ")
+    check("4 shows GRAPH key TI", shows(rows, "4: GRAPH key TI", "1: CAS ON"), "rows=%s" % rows)
+    state(SETTINGS + "4 . clear . graph . . ")
+    check("4 turns it off: TI's graph", not state.kon and state.cx == 0x44,
+          "flag5=%s cxCurApp=%02X" % (state.kon, state.cx))
+    state(SETTINGS + "4 . 4 . clear . graph . . ")
+    check("4 again turns it on", state.kon and state.kptr == kptr0 and state.cx == 0x40,
+          "rawKeyHookPtr=%06X cxCurApp=%02X" % (state.kptr, state.cx))
+    state(SETTINGS + "1 . clear . ")
+    check("CAS off keeps GRAPH key", state.kon and state.kptr == kptr0, "rawKeyHookPtr=%06X" % state.kptr)
+    state(SETTINGS + "1 . 1 . clear . ")
+
     ptr, flag, _, rows = state(SETTINGS + "1 . ")
     check("1 shows CAS OFF", shows(rows, "1: CAS OFF", "2: Cursor TI"), "rows=%s" % rows)
 
     ptr, flag, _, rows = state(SETTINGS + "1 . clear . " + TYPE)
-    check("1 turns CAS off", ptr == ptr0 and not flag & 0x10 and "4X" not in rows and not state.menu,
+    check("1 turns CAS off", ptr == ptr0 and not flag & 0x10 and "4X" not in rows and state.menu == m0,   # GRAPH on keeps the menu hook (ZOOM)
+          
           "flag=%02X rows=%s" % (flag, rows[-2:]))
 
     ptr, flag, _, rows = state(SETTINGS + "1 . 1 . clear . " + TYPE)
@@ -133,6 +158,12 @@ def main():
     ptr, flag, _, _ = state(RAM_CLEAR)
     check("RAM clear drops hook", ptr == 0 and not state.menu, "hookptr=%06X" % ptr)
 
+    ptr, flag, _, rows = state(RAM_CLEAR + SETTINGS)
+    check("RAM clear: GRAPH key TI", not state.kon and shows(rows, "4: GRAPH key TI"),
+          "flag5=%s rawKeyHookPtr=%06X rows=%s" % (state.kon, state.kptr, rows[3:5]))
+    state(RAM_CLEAR + SETTINGS + "4 . clear . ")
+    check("4 re-arms after clear", state.kon and state.kptr == kptr0, "rawKeyHookPtr=%06X" % state.kptr)
+
     ptr, flag, _, rows = state(RAM_CLEAR + SETTINGS + "1 . clear . " + TYPE)
     check("app re-arms after clear", ptr == ptr0 and flag & 0x10 and "4X" in rows and state.menu == m0,
           "hookptr=%06X rows=%s" % (ptr, rows[-2:]))
@@ -146,7 +177,7 @@ def main():
     again = RAM_CLEAR + "apps down enter . clear . L . . . . clear . "
     ptr, flag, _, rows = state(again + TYPE + "y= . 2nd mode . ")
     check("installer replaces app", armed_in_flash(ptr, flag) and rows[-1:] == ["4X"]
-          and state.menu == m0,
+          and state.menu == m0 and state.kon and state.kptr == kptr0,
           "hookptr %06X -> %06X rows=%s" % (ptr0, ptr, rows[-2:]))
 
     ptr, flag, _, rows = state(again * 3 + TYPE + "y= . 2nd mode . ")

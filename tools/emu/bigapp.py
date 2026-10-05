@@ -148,10 +148,10 @@ def main():
     answers("replaces older SymCE", parts(PAD), INSTALL + DONE + TYPE, with_old)
     answers("RAM clear, reinstall", parts(PAD),
             INSTALL + DONE + RAM_CLEAR + INSTALL[2:] + DONE + TYPE, with_old)
-    # Three sectors free: the appvars take two, and the app fits only once
+    # Four sectors free (the app outgrew three): the appvars take three, and the app fits only once
     # the installer has garbage collected the archive, which moves them.
     answers("GC makes room", parts(PAD), INSTALL + DONE + TYPE,
-            rom("gc", erase=range(0x1D, 0x20)), collected=True)
+            rom("gc", erase=range(0x1C, 0x20)), collected=True)
 
     blank = b"\xff" * len(new)
     refused("missing appvar refused", [p for p in parts(PAD) if not p.endswith("2.8xv")],
@@ -170,7 +170,7 @@ def main():
     # here: the shipped one is past it, and erasing a sector for it lets the GC
     # pack the archive into one sector fewer, room enough for the new app.
     old, _ = image(OLD)
-    tight = rom("tight", old=old, undelete=[0x140001], erase=range(0x1D, 0x20))
+    tight = rom("tight", old=old, undelete=[0x140001], erase=range(0x1C, 0x20))
     rows, ptr, flag, r, dest = state(parts(PAD), INSTALL, tight, len(old))
     kept = r["app"] == crc32c(installed(old, dest))
     check("no room keeps old SymCE", any("No blank flash" in l for l in rows) and kept

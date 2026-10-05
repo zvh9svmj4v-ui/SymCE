@@ -32,9 +32,10 @@ Full command list, install steps and known limits: [docs/USAGE.md](docs/USAGE.md
 2. Send `SYMCE.8xp` and every `SYMCE#.8xv` to the calculator's **Archive**
    (together they no longer fit in RAM).
 3. Run `prgmSYMCE` through an ASM launcher (OS 5.8.4 blocks `Asm(`; AsmHook
-   works). It installs the SymCE flash app, about 160 KB, and needs about
+   works). It installs the SymCE flash app, about 230 KB, and needs about
    twice that in free archive while installing. Later upgrades: APPS → SymCE → 5.
-4. **APPS → SymCE** opens the settings: `1` CAS on/off, `2` insert or TI cursor, `3` Evo or TI font, `4` the graph viewer, `5` run `prgmSYMCE` (upgrade with no AsmHook2).
+4. **APPS → SymCE** opens the settings: `1` CAS on/off, `2` insert or TI cursor, `3` Evo or TI font, `4` the GRAPH key (SymCE's full-screen grapher or TI's own), `5` run `prgmSYMCE` (upgrade with no AsmHook2).
+5. The **GRAPH** key now opens SymCE's own full-screen grapher; CLEAR or 2nd QUIT leaves it for the home screen. It has TRACE, ZOOM, 2nd CALC and 2nd DRAW, in Function, Parametric, Polar and Seq mode, and draws the stat plots; what it leaves to TI is in [docs/USAGE.md](docs/USAGE.md). APPS → SymCE → 4 switches the key back to TI's graph.
 
 ## Build
 
@@ -66,6 +67,7 @@ this repository.
 |---|---|
 | `symce/src/engine.c` | The CAS: parser, polynomial/rational arithmetic, roots, calculus, geometry, printer. Plain C, compiled with ez80-clang. |
 | `symce/src/hook.c`, `mhook.c` | Home-screen hook bodies, inline eZ80 assembly. |
+| `symce/src/graph.c`, `graph_draw.c`, `graph_stat.c` | The full-screen grapher: Function/Par/Pol/Seq, TRACE, ZOOM, CALC, DRAW, stat plots. |
 | `symce/src/menu.c` | The ALPHA+DOWN popup and the 2nd MATH tabs. |
 | `symce/app/` | fasmg sources for the flash app and its installer. |
 | `tools/` | Host tests, the eZ80 simulator, `relocs.py` (turns the engine into relocatable app code). |

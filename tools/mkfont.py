@@ -30,7 +30,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FONT = os.path.join(ROOT, 'symce', 'font')
 OUT = os.path.join(ROOT, 'symce', 'obj', 'font.inc')
 ROM = os.environ.get('AUTOTESTER_ROM') or os.path.expanduser('~/CEdev/ti84pce.rom')
-TTF = os.environ.get('ROBOTO_TTF', '/tmp/claude-501/evofont/Roboto-var.ttf')
+TTF = os.environ.get('ROBOTO_TTF', 'Roboto-var.ttf')
 
 LW, LH = 12, 14
 # Covered display glyph indices: ASCII 0x21..0x7E (0x5B is theta here, not '['),
