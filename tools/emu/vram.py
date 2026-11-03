@@ -17,7 +17,7 @@ import screen
 from e2e import FILES
 
 VRAM, W, H = 0xD40000, 320, 240
-SYMCE = "apps down enter . clear . L . . clear . "   # arm AsmHook2, run the installer
+SYMCE = "apps down enter . clear . L " + ". " * 20 + "clear . "   # arm AsmHook2, run the installer
 
 
 def grab(keys, y0=0, y1=H, ystep=1, xstep=1, extra=(), **kw):
@@ -50,21 +50,22 @@ def ascii(px, x0=0, x1=W):
     return "\n".join(out)
 
 
-def png(px, path):
-    """Grey PNG, stdlib only; unread pixels (FFFF from an aborted read) are white."""
+def png(px, path, scale=1, color=True):
+    """RGB (grey if not `color`) PNG, stdlib only, each pixel repeated `scale` times; unread pixels (FFFF from an aborted read) are white."""
     xs, ys = sorted({x for x, _ in px}), sorted({y for _, y in px})
     raw = b""
     for y in ys:
         row = bytearray([0])
         for x in xs:
             v = px[(x, y)]
-            r, g, b = (v >> 11) << 3, ((v >> 5) & 63) << 2, (v & 31) << 3
-            row.append((r * 3 + g * 6 + b) // 10)
-        raw += bytes(row)
+            r, g, b = (v >> 11) & 31, (v >> 5) & 63, v & 31
+            r, g, b = (r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2)
+            row += (bytes((r, g, b)) if color else bytes(((r * 3 + g * 6 + b) // 10,))) * scale
+        raw += bytes(row) * scale
 
     def chunk(t, d):
         return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
-    open(path, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", len(xs), len(ys), 8, 0, 0, 0, 0))
+    open(path, "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", len(xs) * scale, len(ys) * scale, 8, 2 if color else 0, 0, 0, 0))
                            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
 
 

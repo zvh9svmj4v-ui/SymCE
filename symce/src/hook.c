@@ -87,6 +87,7 @@ __asm__(
 "	.equ	baseTop,    0x0D0EE00\n"      /* editTop captured while the entry line was empty */
 "	.equ	baseOk,     0x0D0EE03\n"      /* 0xA5 once baseTop belongs to THIS entry */
 "	.equ	pending,    0x0D0EE04\n"      /* 0xFF: ENTER, for A=2 to try; 0xFE: A=2 answered, A=0 shows it */
+"	.equ	gotoFix,    0x0D0EE07\n"      /* 0xA5: an error's 2:Goto is coming, so the next home-screen poll takes a new baseline */
 "	.equ	inKey,      0x0D0EE05\n"      /* nonzero: the hook itself is running this key through cxMain */
 "	.equ	cxMain,     0x0D007CA\n"      /* the home screen's key handler, A = key; calls this hook at A=1 first */
 "	.equ	ansBuf,     0x0D0EE80\n"      /* the answer, as tokens (MAXOUT = 64 at most); then the text 0x91FC2 draws */
@@ -122,9 +123,19 @@ __asm__(
    inside a MathPrint box or a menu. */
 "\tpush\thl\n"
 "\tpush\tde\n"
+/* After 2:Goto the entry is back in a new edit buffer: take its editTop as the baseline,
+   as for a new line, so insert mode comes back on the first poll. */
+"\tld\ta, (gotoFix)\n"
+"\tcp\ta, 0x0A5\n"
+"\tjr\tnz, .Lng\n"
+"\txor\ta, a\n"
+"\tld\t(gotoFix), a\n"
+"\tjr\t.Lcap\n"
+".Lng:\n"
 "\tld\ta, (cmdFlags)\n"
 "\tand\ta, 0x20\n"
 "\tjr\tz, .Lnotnew\n"
+".Lcap:\n"
 "\tld\thl, (editTop)\n"
 "\tld\t(baseTop), hl\n"
 "\tld\ta, 0xA5\n"
@@ -260,9 +271,18 @@ __asm__(
 "\tpop\tiy\n"
 "\tpop\tde\n"
 "\tpop\thl\n"
+"\tor\ta, a\n"
+"\tjr\tnz, .Lgans\n"
 "\txor\ta, a\n"
 "\tinc\ta\n"
 "\tret\n"
+/* Graph Ans: main.asm's graphAns, the fourth word past the body; it ends in the grapher, not here. */
+".Lgans:\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, _symce_hook_end + 10 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tld\thl, (hl)\n"
+"\tjp\t(hl)\n"
 ".Lmbad:\n"
 "\tpop\tde\n"
 "\tpop\thl\n"
@@ -386,6 +406,22 @@ __asm__(
    path never looks at it. Measured: without this, Done follows the answer. */
 "\tld\thl, 0x0D00080\n"
 "\tres\t5, (hl)\n"
+/* steps( : the worked solution over the screen, menu.c's steps_show (the menu blob's fifth entry),
+   which returns at once unless the engine left a step log. */
+"\tpush\tiy\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, .Lsback - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tpush\thl\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, _symce_hook_end + 3 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tld\thl, (hl)\n"
+"\tld\tde, 16\n"
+"\tadd\thl, de\n"
+"\tjp\t(hl)\n"
+".Lsback:\n"
+"\tpop\tiy\n"
 "\tpop\tbc\n"
 "\tpop\tde\n"
 "\tpop\thl\n"
@@ -541,8 +577,109 @@ __asm__(
 "\tldir\n"
 "\txor\ta, a\n"
 "\tld\t(pending), a\n"
+/* The OS files a failed entry in history with "Error" as its answer, so UP in MathPrint can paste it
+   again; thrown from here it was filed nowhere. The same flag prologue and 0x91FC2 call as an answer (.Lshow),
+   type 0x0E (the OS's own Error string; filed as type 0x15, length 5). */
+"\tld\thl, 0x0D000D3\n"
+"\tres\t7, (hl)\n"
+"\tld\thl, 0x0D0009F\n"
+"\tres\t0, (hl)\n"
+"\tres\t4, (hl)\n"
+"\tld\thl, 0x0D000C9\n"
+"\tset\t2, (hl)\n"
+"\tres\t6, (hl)\n"
+"\txor\ta, a\n"
+"\tld\t(0x0D00338), a\n"
+"\tld\t(0x0D00339), a\n"
+"\tld\t(0x0D02713), a\n"
+"\tld\t(0x0D00334), a\n"
+"\tld\t(0x0D02506), a\n"
+"\tld\thl, 0x0D0033A\n"
+"\tld\t(0x0D00335), hl\n"
+"\tld\ta, 0x0E\n"             /* type 0x0E: dispResult draws and files the OS's own "Error" string (ROM 0x92253), HL unused */
+"\tcall\tdispResult\n"
+/* steps( with no real roots: the worked steps first, the error screen after them. */
+"\tpush\tiy\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, .Lsback2 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tpush\thl\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, _symce_hook_end + 3 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tld\thl, (hl)\n"
+"\tld\tde, 16\n"
+"\tadd\thl, de\n"
+"\tjp\t(hl)\n"
+".Lsback2:\n"
+"\tpop\tiy\n"
+/* The OS's Quit redraws home from its 1-bit pixel shadows, in black, so the rainbow parentheses and blue
+   letters of the history go (the OS's own errors too): menu.c err_save (blob +24) keeps every coloured pixel
+   for fhook.c's next cursor glyph to put back (err_put, +28). */
+"\tpush\tiy\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, .Lsback3 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tpush\thl\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, _symce_hook_end + 3 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tld\thl, (hl)\n"
+"\tld\tde, 24\n"
+"\tadd\thl, de\n"
+"\tjp\t(hl)\n"
+".Lsback3:\n"
+"\tpop\tiy\n"
+/* The OS skips the description lines (and so the localize hook's call) when the
+   first is empty: an empty detail becomes a space. */
+"\tld\thl, 0x0D025A9\n"
+".Lttl:\n"
+"\tld\ta, (hl)\n"
+"\tinc\thl\n"
+"\tor\ta, a\n"
+"\tjr\tnz, .Lttl\n"
+"\tld\ta, (hl)\n"
+"\tor\ta, a\n"
+"\tjr\tnz, .Lfull\n"
+"\tld\t(hl), 0x20\n"
+".Lfull:\n"
+/* The localize hook (lhook.c) puts the description lines under the title; with the
+   Evo font off nobody has it armed, so arm it for this one screen (its 0xD3 call
+   disarms it, tempArm says so). Not over someone else's. */
+"\tld\ta, (0x0D000B5)\n"             /* hookflags3 */
+"\tbit\t1, a\n"
+"\tjr\tnz, .Lnoarm\n"
+"\tor\ta, 2\n"
+"\tld\t(0x0D000B5), a\n"
+"\tld\thl, (hookPtr)\n"
+"\tld\tde, _symce_hook_end + 7 - _symce_hook\n"
+"\tadd\thl, de\n"
+"\tld\thl, (hl)\n"
+"\tld\t(0x0D02611), hl\n"           /* localizeHookPtr */
+"\tld\ta, 1\n"
+"\tld\t(0x0D0EE06), a\n"            /* tempArm */
+".Lnoarm:\n"
+/* SYNTAX and ARGUMENT can be fixed in the entry: error 0xAB, which is 0x2B with
+   2:Goto (the OS's own SYNTAX is 0x8B). Their third letters are N and G. */
+"\tld\ta, (ansBuf + 2)\n"
+"\tcp\ta, 0x4E\n"
+"\tjr\tz, .Lgoto\n"
+"\tcp\ta, 0x47\n"
+"\tjr\tz, .Lgoto\n"
 "\tld\ta, 0x2B\n"
-"\tjp\t0x020790\n"                /* _JError */
+"\tjr\t.Lthrow\n"
+".Lgoto:\n"
+/* errOffset is where Goto puts the cursor: a token offset from the start of the
+   entry (measured on the OS's own errors); the engine left it at ansBuf + MAXOUT. */
+"\tld\ta, (ansBuf + 64)\n"
+"\tld\thl, 0\n"
+"\tld\tl, a\n"
+"\tld\t(0x0D008E3), hl\n"          /* errOffset */
+"\tld\ta, 0x0A5\n"
+"\tld\t(gotoFix), a\n"
+"\tld\ta, 0x0AB\n"
+".Lthrow:\n"
+"\tjp\t0x020790\n"
 /* The key run through (cxMain), from .Lnotnew's key test (see there). hl and
    de are on the stack. */
 ".Lwrap:\n"

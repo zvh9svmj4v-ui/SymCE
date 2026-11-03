@@ -108,7 +108,7 @@ def main():
     ap.add_argument("--only", help="run one trigger by label")
     a = ap.parse_args()
     if a.ram:
-        prologue, files, launch = ("C . apps down enter . clear . L . clear . ",
+        prologue, files, launch = ("C . apps down enter . clear . L " + ". " * 20 + "clear . ",
                                    (a.ram,), "SYMCE")
     else:
         prologue, files, launch = PROLOGUE, FILES, LAUNCH

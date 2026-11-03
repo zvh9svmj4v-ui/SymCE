@@ -29,18 +29,18 @@ is right-aligned, a string is not, and the string version of this shipped.
 Then 2nd ENTRY is pressed and must recall the entry alone: the version that
 rewrote the entry to 2X+2X:"4X" leaked the rewrite into the recall.
 """
-import glob
+import cmdkeys, glob
 import os
 import sys
 import screen
 
 # Get to a usable home screen with SymCE installed and armed. The installer's
 # "press any key" prompt eats the last `clear`; the extra `.` covers the flash
-# write.
-PROLOGUE = "C . apps down enter . clear . L . . clear . "
+# write; a 270 KB app (5 appvars) takes about 25 s, so it waits 20 of them (330 KB, 6 appvars: ~30 s).
+PROLOGUE = "C . apps down enter . clear . L " + ". " * 20 + "clear . "
 # prgmSYMCE, and the appvars carrying the app it installs (make emu copies both).
 FILES = ("SYMCE.8xp",) + tuple(sorted(os.path.basename(f) for f in
-                                      glob.glob(os.path.join(screen.HERE, "SYMCE[1-9].8xv"))))
+                                      glob.glob(os.path.join(screen.HERE, "SYMCE[1-9A-Z].8xv"))))
 LAUNCH = "SYMCE"
 
 
@@ -58,14 +58,15 @@ SQ, CB = b"\x12", b"\xd5"
 # echo the OS must show, byte for byte.
 NEG = b"\x1a"                               # the OS's negation glyph
 I = b"\xd7"                                 # i; a list is { , } as 7B 2C 7D, √ is 10 28
-# ALPHA then a key types a letter (all 26 measured on this ROM); spell() types
-# a command's name and its '(', as the menus do.
+# ALPHA then a key types a letter (all 26 measured on this ROM). Commands are not typed by
+# letter, though: their names are lowercase tokens that only the menus type, so spell() picks
+# the command from the ALPHA+DOWN popup (cmdkeys.py) and that types its name and its '('.
 ALPHA = dict(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
                  "math apps prgm -1 sin cos tan ^ ^2 , ( ) / log 7 8 9 * ln 4 5 6 - sto 1 2".split()))
 
 
 def spell(name):
-    return " ".join("alpha " + ALPHA[c] for c in name) + " ("
+    return cmdkeys.spell(name)
 
 
 CASES = [
@@ -113,6 +114,13 @@ CASES = [
     ("SOLVE(Y+4=8,Y)", "alpha down 1 alpha 1 + 4 2nd math 1 8 , alpha 1 )", b"Y=4", "for the variable after the comma"),
     ("DERIV(X^3)", "alpha down 4 xton ^ 3 )", b"3X" + SQ, "d/dX"),
     ("EXPAND((X+1)^2)", "alpha down 3 ( xton + 1 ) ^ 2 )", b"X" + SQ + b"+2X+1", "EXPAND"),
+    # A command inside another command's arguments, or in a plain expression.
+    ("SOLVE(EXPAND(X+1)^2=0,X)", "alpha down 1 alpha down 3 xton + 1 ) ^ 2 2nd math 1 0 , xton )",
+     b"X=" + NEG + b"1", "EXPAND inside SOLVE: the answer goes back in as (answer)"),
+    ("2*EXPAND((X+1)^2)", "2 * alpha down 3 ( xton + 1 ) ^ 2 )", b"2X" + SQ + b"+4X+2",
+     "a command in the middle of an expression is SymCE's, not the OS's"),
+    ("FACTOR(DERIV(X^3-3X,X))", "alpha down 2 alpha down 4 xton ^ 3 - 3 xton , xton ) )", b"3(X-1)(X+1)",
+     "two deep"),
     ("FACTOR(X^4-5X^2+6)", "alpha down 2 xton ^ 4 - 5 xton ^ 2 + 6 )", b"(X" + SQ + b"-3)(X" + SQ + b"-2)",
      "split over sqrt is too wide for Classic: the rational factors"),
     # The Algebra menu's commands, spelled with ALPHA letters.
@@ -288,9 +296,9 @@ def main():
     print("%-6s DelVar -> %-6s %s" % ("X", show(got[-1]) if got else "<missing>",
           "ok  no value stored: X stays a letter" if good else "FAIL %r" % got))
 
-    # A command SymCE cannot finish is its own ERR screen, 1:Quit only, the
+    # A command SymCE cannot finish is its own ERR screen (1:Quit, and 2:Goto for SYNTAX and ARGUMENT), the
     # message in appErr1; Quit goes home and the next entry answers as ever.
-    for keys, msg in (("alpha down 1 xton ^ 2 + 1 2nd math 1 0 , xton )", b"NO SOLUTION\0\0"),
+    for keys, msg in (("alpha down 1 xton ^ 2 + 1 2nd math 1 0 , xton )", b"NO SOLUTION\0 \0"),    # an empty detail is a space: the OS skips empty lines (hook.c .Lerr)
                       ("alpha down 1 xton ^ 2 - 4 )", b"SYNTAX\0SOLVE(A=B,X)\0\0"),
                       # 1/3 is stored as 0.33333333333333: over 6 digits
                       ("1 / 3 sto xton enter . " + solve, b"SYMCE LIMIT\0SOLVE\0"),
@@ -307,10 +315,12 @@ def main():
             if b"\xff" * 4 not in r["msg"]:
                 break
         got = [t for t, _ in run(keys + " enter . . 1 . 2 xton + 2 xton enter .")[1:]]
-        good = r["errNo"] == b"\x2b" and r["msg"].startswith(msg) and got[-2:] == [b"2X+2X", b"4X"]
+        # SYNTAX and ARGUMENT are 0xAB: the same screen with 2:Goto
+        want = b"\xab" if msg[:3] in (b"SYN", b"ARG") else b"\x2b"
+        good = r["errNo"] == want and r["msg"].startswith(msg) and got[-2:] == [b"2X+2X", b"4X"]
         ok &= good
         shown = msg.rstrip(b"\0").replace(b"\0", b" / ").decode("latin-1")
-        print("%-6s ERR    -> %-6s %s" % ("SymCE", shown, "ok  ERROR: %s, 1:Quit, home again" % shown
+        print("%-6s ERR    -> %-6s %s" % ("SymCE", shown, "ok  ERROR: %s, home again" % shown
               if good else "FAIL errNo %s msg %r after %r" % (r["errNo"].hex(), r["msg"], got)))
 
     # Insert cursor: a key typed with the cursor on a character goes in before
@@ -342,7 +352,8 @@ def main():
     # menu paste is swallowed, stock OS included, hence two.
     prg = basic_program("AA", bytes.fromhex("DE3258703258" "3F" "3258703358"))
     got = [t for t, _ in run("prgm enter . enter . enter . .", FILES + (prg,))[1:]]
-    good = got == [b"prgmAA", b"0", b"0"]
+    # (with 17 files sent the swallowed ENTER is not always swallowed and it runs twice)
+    good = got in ([b"prgmAA", b"0", b"0"], [b"prgmAA", b"0", b"0"] * 2)
     ok &= good
     print("%-6s program -> %-6s %s" % ("Disp", show(b" ".join(got[1:])),
           "ok  a program's output stays numeric" if good else "FAIL %r" % got))
@@ -397,6 +408,26 @@ def main():
         print("%-6s 2D     -> %-6s %s" % ("MthPrt", shown if good else "", "ok  " + why if good
               else "FAIL type %s text %s last %s" % (r["type"].hex(), r["text"].hex(), r["last"].hex())))
 
+    # The user's own form, Classic: the 28-character entry wraps to two rows; the answer row is X=-1, flush right.
+    rows = run("alpha down 1 ( alpha down 3 ( xton + 1 ) ^ 2 ) ) 2nd math 1 0 , xton ) enter .")[1:]
+    good = len(rows) >= 2 and b"".join(r[0] for r in rows[:-1]) == b"SOLVE((EXPAND((X+1)^2))=0,X)" \
+        and rows[-1] == (b"X=" + NEG + b"1", True)
+    ok &= good
+    print("%-6s nested -> %s %s" % ("Classic", "X=-1" if good else "", "ok  SOLVE((EXPAND((X+1)^2))=0,X), wrapped" if good
+          else "FAIL rows %r" % (rows,)))
+
+    # The same command inside a command, MathPrint, as typed: the answer is Ans, X=-1.
+    for settle in (1500, 1900, 2300):
+        r = screen.read([("last", 0xD0EE20, 5), ("errNo", 0xD008DF, 1)],
+                        keys=PROLOGUE.replace("C ", "", 1) + "alpha down 1 ( alpha down 3 ( xton + 1 ) ^ 2 right ) ) "
+                        "2nd math 1 0 , xton ) enter . .", files=FILES, launch=LAUNCH, lead=False, settle=settle, per_key=300)
+        if b"\xff" * 4 not in r["last"]:
+            break
+    good = r["last"] == bytes.fromhex("0458 6a b0 31".replace(" ", ""))
+    ok &= good
+    print("%-6s nested -> %-6s %s" % ("MthPrt", "X=-1" if good else "", "ok  SOLVE((EXPAND((X+1)^2))=0,X)" if good
+          else "FAIL last %s errNo %s" % (r["last"].hex(), r["errNo"].hex())))
+
     ok &= menu()
     ok &= fonts()
     print("\nALL PASS" if ok else "\nFAILURES ABOVE")
@@ -404,7 +435,11 @@ def main():
 
 
 # ---- the Evo font: the table's glyphs, pixel for pixel, in VRAM -------------------
-SYMCE_APP = "apps " + "down " * 16 + "enter . . "          # APPS > SymCE: the settings screen
+# Test-only: SYMCE_MENU_SKIP=n when SYMCE_ROOMY_TO erased n apps that come before SymCE in the menu
+# (and SYMCE_MEM_SKIP=m for the Mem Mgmt apps list); 6 and 8 for 0x2E91E7, see lifecycle.py.
+MENU_SKIP = int(os.environ.get("SYMCE_MENU_SKIP", 0))
+MEM_SKIP = int(os.environ.get("SYMCE_MEM_SKIP", 0))
+SYMCE_APP = "apps " + "down " * (16 - MENU_SKIP) + "enter . . "          # APPS > SymCE: the settings screen
 
 
 def font_glyphs():
@@ -518,14 +553,14 @@ def fonts():
     return ok
 
 
-def mathprint(keys, vram=False, classic=False):
+def mathprint(keys, vram=False, classic=False, settles=(1500, 1900, 2300)):
     """MathPrint, after the keys: the entry's bytes before and after the cursor,
     and with vram, the screen as 16-row band CRCs. The entry is read out of
     the edit buffer's two halves, editTop..editCursor and editTail..editBtm;
     MathPrint keeps it at 0xD1A8xx / 0xD2A8xx (measured)."""
     lo, hi = 0xD1A800, 0xD2A800
     bands = [("v%03d" % y, 0xD40000 + 640 * y, 640 * 16) for y in range(0, 240, 16)] if vram else []
-    for settle in (1500, 1900, 2300):
+    for settle in settles:
         r = screen.read([("edit", 0xD02437, 12), ("lo", lo, 256), ("hi", hi, 128),
                          ("cx", 0xD007E0, 1), ("errNo", 0xD008DF, 1)],
                         keys=(PROLOGUE if classic else PROLOGUE.replace("C ", "", 1)) + keys, files=FILES,
@@ -565,12 +600,13 @@ def menu():
 
     # CLEAR, ALPHA, 2nd+QUIT and ALPHA+DOWN again all close it with nothing
     # typed (ALPHA+DOWN again: ALPHA closes, DOWN reaches the OS, which ignores
-    # it on a one-line entry); UP wraps to 0:Extract, RIGHT opens it, DOWN and
-    # ENTER pick its right(; the history above stays.
+    # it on a one-line entry); UP wraps to Graph Ans, UP again to steps(, once more to A:Matrix, RIGHT opens it, DOWN and
+    # ENTER pick its MINV(; the history above stays.
     got = [t for t, _ in run("2 + 3 enter . 7 alpha down clear 8 alpha down alpha 9 "
-                             "alpha down 2nd mode 4 alpha down alpha down 5 alpha down up right down enter")[1:]]
-    ok &= report("close", got == [b"2+3", b"5", b"78945RIGHT("],
-                 "CLEAR, ALPHA, QUIT, ALPHA+DOWN close; UP RIGHT DOWN ENTER", got)
+                             "alpha down 2nd mode 4 alpha down alpha down 5 alpha down up up up right down enter")[1:]]
+    got = [t.rstrip(b"\xe4") for t in got]            # the insert bar, if the read caught it lit
+    ok &= report("close", got == [b"2+3", b"5", b"78945MINV("],
+                 "CLEAR, ALPHA, QUIT, ALPHA+DOWN close; UP UP UP RIGHT DOWN ENTER", got)
 
     # Submenus: 5 is Polynomial Tools, whose 8 is Degree; LEFT from one, or
     # CLEAR, is back at Algebra (on the submenu's item: ENTER reopens it).
@@ -585,11 +621,11 @@ def menu():
     rest = " xton ^ 2 right - 1 )"
     menu_pick = mathprint("2 + 3 enter . alpha down 2" + rest)
     by_hand = mathprint("2 + 3 enter . alpha cos alpha math alpha prgm alpha 4 alpha 7 alpha * (" + rest)
-    ok &= report("MthPrt", menu_pick[:2] == by_hand[:2] and menu_pick[0] is not None
-                 and menu_pick[0].startswith(bytes.fromhex("46414354 4f5210")),
-                 "the same buffer as FACTOR( typed by hand", menu_pick[0])
+    ok &= report("MthPrt", menu_pick[0] is not None and menu_pick[0].startswith(cmdkeys.tokens("FACTOR") + b"\x10")
+                 and by_hand[0].startswith(b"FACTOR\x10") and menu_pick[1] == by_hand[1],
+                 "factor( is lowercase tokens; FACTOR( typed by hand is capital variables", menu_pick[0])
     before, after, _ = mathprint("7 8 left alpha down 1")
-    ok &= report("MthPrt", (before, after) == (b"7SOLVE\x10", b"8"),          # 0x10 is (
+    ok &= report("MthPrt", (before, after) == (b"7" + cmdkeys.tokens("SOLVE") + b"\x10", b"8"),          # 0x10 is (
                  "mid-entry: 7SOLVE( before the cursor, 8 after", before)
     # Closed with CLEAR, not a pixel differs from never having opened it: not
     # at once, and not after a submenu, back to Algebra, another and back,
@@ -610,7 +646,7 @@ def menu():
     got = run(keys)[-1][0]
     ok &= report("tab", got == b"7=7 and SOLVE(" and run.err == 0, "TEST, LOGIC, then Algebra's solve(", got)
     before, after, _ = mathprint(keys)
-    ok &= report("MthPrt", (before, after) == (bytes.fromhex("376a3740 534f4c564510"), b""),
+    ok &= report("MthPrt", (before, after) == (bytes.fromhex("376a3740") + cmdkeys.tokens("SOLVE") + b"\x10", b""),
                  "tab: 7=7 and SOLVE( as tokens", before)
     # A > item in the tab opens the popup at its submenu: 9 Complex, 3 cZeros.
     got = run("7 2nd math left left left 9 3")[-1][0]
@@ -621,8 +657,9 @@ def menu():
     picked = mathprint("2 xton ^ 2nd math right right right 2" + tail, vram=True)
     by_hand = mathprint("2 xton ^ alpha cos alpha math alpha prgm alpha 4 alpha 7 alpha * (" + tail,
                         vram=True)
-    ok &= report("MthPrt", picked == by_hand and picked[2][-2:] == [0x40, 0],
-                 "tab in a box: the same screen as FACTOR( by hand", picked[0])
+    ok &= report("MthPrt", picked[2][-2:] == [0x40, 0] and picked[2] != by_hand[2]
+                 and picked[2] != mathprint("2 xton ^" + tail, vram=True)[2],
+                 "tab in a box: factor( is lowercase tokens, not the screen of FACTOR( by hand", picked[0])
     # The popup's text must not outlive it: VPutS records glyphs in the OS's
     # pixel shadows, which the next full-screen redraw of home (2nd MATH
     # closed or picked from, MODE) replays over the entry. With the popup
@@ -631,16 +668,20 @@ def menu():
     for classic in (False, True):
         mode = "Classic" if classic else "MthPrt"
         for after in ("2nd math 1", "2nd math clear", "mode clear"):
-            never = mathprint("7 8 left " + after, vram=True, classic=classic)
-            seen = mathprint("7 8 left alpha down clear " + after, vram=True, classic=classic)
+            for settle in (1500, 1900, 2300):       # the status bar's clock is timing-dependent: a leak shows at every settle
+                never = mathprint("7 8 left " + after, vram=True, classic=classic, settles=(settle,))
+                seen = mathprint("7 8 left alpha down clear " + after, vram=True, classic=classic, settles=(settle,))
+                if seen == never:
+                    break
             ok &= report(mode, seen == never,
                          "popup closed, then %s: screen as without it" % after, seen[0])
     # And a submenu's pick there: Trigonometry's tCollect(, T C O L L E C T (.
     picked = mathprint("2 xton ^ 2nd math left left left 8 2" + tail, vram=True)
     by_hand = mathprint("2 xton ^ alpha 4 alpha prgm alpha 7 alpha ) alpha ) alpha sin alpha prgm alpha 4 (" + tail,
                         vram=True)
-    ok &= report("MthPrt", picked == by_hand and picked[2][-2:] == [0x40, 0],
-                 "submenu in a box: as tCollect( by hand", picked[0])
+    ok &= report("MthPrt", picked[2][-2:] == [0x40, 0] and picked[2] != by_hand[2]
+                 and picked[2] != mathprint("2 xton ^" + tail, vram=True)[2],
+                 "submenu in a box: tCollect( is lowercase tokens, not the screen of TCOLLECT( by hand", picked[0])
 
     # The Calculus menu: RIGHT from Algebra in the popup, the fifth
     # tab in 2nd MATH. Derivative and Tangent Line are SymCE's, answered; the
@@ -666,7 +707,7 @@ def menu():
     # are MATH APPS PRGM x⁻¹ (A Arc Length, D Numeric Calculations); LEFT from
     # a submenu is back on its item, ENTER reopens it; LEFT at the top is
     # Algebra (3 expand(); B, Series, 1 Taylor.
-    got = run("alpha down right up up enter alpha down right math alpha down right -1 left enter 2 "
+    got = run("alpha down right up up up enter alpha down right math alpha down right -1 left enter 2 "
               "alpha down right left 3 alpha down right apps 1")
     got = b"".join(t for t, _ in got[-2:]).rstrip(b"\xe4")
     ok &= report("calc", got == b"IMPDIF(ARCLEN(CENTRALDIFF(EXPAND(TAYLOR(" and run.err == 0,
@@ -674,7 +715,7 @@ def menu():
     # The tab: 9 Tangent Line; D, Numeric Calculations, opens the popup there,
     # whose 3 is the OS's fnInt(.
     got = [show(t) for t, _ in run("2nd math left left 9 xton ^2 , xton , 1 ) enter . "
-                                   "2nd math left left up enter 3 xton , xton , 0 , 1 ) enter .")[1:]]
+                                   "2nd math left left up up enter 3 xton , xton , 0 , 1 ) enter .")[1:]]
     ok &= report("calc", got == ["TANGENTLINE(X²,X,1)", "2X-1", "fnInt(X,X,0,1)", "0.5"] and run.err == 0,
                  "tab: Tangent Line, fnInt( by the OS", got)
     # MathPrint: the OS key goes in as the OS's own MATH 8 does, template and all.

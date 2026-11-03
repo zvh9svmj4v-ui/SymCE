@@ -6,9 +6,8 @@
  * first time, then each GetCSC code. It returns 0 to stay, 1 to go home, or an
  * OS key code that main.asm hands to the OS (Y=, WINDOW, MODE ...).
  *
- * The screen: the plot is 319x219 at (0,0); column 319 and the rows 219..239
- * are the border colour. TI's 265x165 grid (gx 0..264, gy 0..164) maps onto it
- * as px = round(gx*318/264), py = round((164-gy)*218/164); Xres samples every
+ * The screen: the plot is 319x240 at (0,0); column 319 is the border colour. TI's 265x165 grid (gx 0..264, gy 0..164) maps onto it
+ * as px = round(gx*318/264), py = round((164-gy)*239/164); Xres samples every
  * Xres logical columns like the OS does. It draws the FORMAT options the
  * OS keeps in RAM: grid (dots or lines), axes and their ticks, labels, the 15
  * colours, and each Yn's line style (thin, normal, dot-thick, dotted).
@@ -27,7 +26,8 @@
  *
  * Like engine.c it runs from flash: no writable statics, all state in `w`.
  *
- * ponytail: the OS window is taken as it is (no ERR:WINDOW RANGE); float32
+ * ponytail: the OS window is taken as it is (an empty one never gets here: the OS's ERR:WINDOW RANGE
+ * comes first, graph.py fall); float32
  * samples, libc sinf/powf accuracy as it comes; arrows do nothing yet.
  */
 #include <stdint.h>
@@ -38,9 +38,11 @@
 #define MAXTOK 96                /* tokens copied per equation; longer goes to the OS parser */
 #define MAXOP  112               /* ops in one program */
 #define STK    12                /* evaluation stack */
+#define IX     40                /* implicit equations: grid cells across (and IY down) */
+#define IY     28
 #define MAXDEP 6                 /* nested parentheses */
 #define PW     319               /* plot columns */
-#define PH     219               /* plot rows; the bar below is white too */
+#define PH     239               /* the y scale, as 318 is the x scale: row = (164 - gy) * PH / 164. Bounds are PW columns, SH rows. */
 #define VS     320               /* VRAM stride, pixels */
 #define SH     240               /* screen rows */
 
@@ -49,7 +51,9 @@
 #endif
 
 /* OS RAM, read in place (the addresses are the same in every build). */
+#ifndef OSB
 #define OSB(a) (*(volatile uint8_t *)(a))
+#endif
 #define OSW(a) (*(volatile uint16_t *)(a))
 #define ADDR_MODE   0x0D00082    /* grfModeFlags: Func 10, Pol 20, Par 40, Seq 80 */
 #define ADDR_DB     0x0D00084    /* grfDBFlags: 04 grid, 40 labels, 80 grid lines */
@@ -73,9 +77,9 @@
 #define ADDR_PSTART 0x0D01E9F
 #define ADDR_PSTEP  0x0D01EE7
 
-enum { O_K, O_X, O_ADD, O_SUB, O_MUL, O_DIV, O_POW,
+enum { O_K, O_X, O_Y, O_ADD, O_SUB, O_MUL, O_DIV, O_POW,
        O_EQ, O_LT, O_GT, O_LE, O_GE, O_NE,          /* tokens 6A..6F in order */
-       O_AND, O_OR, O_XOR,
+       O_AND, O_OR, O_XOR, O_MIN, O_MAX,            /* the last two: AND and OR of an implicit equation */
        O_NEG, O_SQ, O_CU, O_INV, O_SQRT, O_LN, O_EXP, O_LOG, O_E10, O_ABS,
        O_NOT, O_INT, O_IPART, O_FPART,
        O_SIN, O_ASIN, O_COS, O_ACOS, O_TAN, O_ATAN };   /* the last six are tokens C2..C7 in order */
@@ -83,6 +87,7 @@ enum { O_K, O_X, O_ADD, O_SUB, O_MUL, O_DIV, O_POW,
 enum { E_OK, E_TOK, E_LONG, E_SYN, E_DEEP };
 
 #include "graph_draw.h"
+#include "graph_table.h"
 
 /* The first fields, up to `tok`, are what main.asm fills; their offsets are
    fixed there. All bytes, so the layout is the same on the host. */
@@ -95,10 +100,13 @@ struct gw {
     uint8_t tok[NEQ][MAXTOK];    /* 304 in: the equations' tokens */
     /* state, not the assembler's */
     float x0, x1, y0, y1;        /* the window in view */
-    float sx, sy;                /* pixels per unit: 318/(x1-x0), 218/(y1-y0) */
+    float sx, sy;                /* pixels per unit: 318/(x1-x0), 239/(y1-y0) */
     uint8_t op[MAXOP];           /* the program being compiled or run */
     float k[MAXOP];
     uint8_t n, sp, dep, err, errtok;
+    uint8_t uy, yop;             /* the equation has a Y; Y compiles to O_Y (an implicit equation) */
+    uint16_t imp;                /* bit i: Yi is drawn as a relation of X and Y (TRACE and CALC skip it) */
+    float oy;                    /* O_Y's value */
     const uint8_t *p, *e;        /* parse position, end */
     uint8_t pm, n1, lp;          /* mode (0 Func 1 Par 2 Pol); ops of the first program (Par: X's, the Y's follow); last pair plotted + 1 */
     uint8_t tv[9];               /* Par, Pol: the T or theta of the last point plotted, a TI real */
@@ -117,7 +125,13 @@ struct gw {
     unsigned pi;                 /* ... and the point's place in its lists */
     int sn;                      /* Seq: the n the OS's solver is at, -1 = not started */
     uint8_t ent[24];             /* the typed tokens */
-    uint16_t sv[81];             /* the pixels under the cursor */
+    union {
+        uint16_t sv[81];         /* the pixels under the cursor */
+        struct {                 /* idraw's two rows of nodes (render drew the cursor away: shown is 0): f, and 0 = NaN / infinite, 1 = f < 0, 2 = f >= 0 */
+            float f[2][IX + 1];
+            uint8_t c[2][IX + 1];
+        } fr;
+    };
     /* ZOOM (phase 1c) */
     uint8_t zm, zc;              /* 0 or the zoom the cursor is for (Z_BOX ...); ZBox: first corner set */
     int zx, zy;                  /* ZBox: the first corner, logical */
@@ -127,31 +141,50 @@ struct gw {
     uint8_t cm, cs, cf, cf2, cres, sr;   /* item (C_*) or 0; stage; first and second curve; 1 result up, 2 cursor gone; label strip rows */
     uint8_t cl[9], cr[9], cd[9]; /* left bound / lower limit, right bound / upper limit, dy/dx or the integral (TI reals) */
     int cmc[2];                  /* the bound markers' columns */
-    char ptb[28], ptc[24];       /* the prompt or result line above the bar; the integral's limits in place of X= and Y= */
-    uint8_t psv;                 /* the 5 plot rows under ptb are saved in PBUF */
+    char ptb[28], ptc[40];       /* the prompt or result line above the bar; the integral's limits in place of X= and Y= */
+    uint8_t psv;                 /* the PBR plot rows under ptb are saved in PBUF */
+    /* TRACE snap (function mode): the samples seen and the POI label */
+    uint8_t tps, hn;             /* a POI label is up; samples kept (0..2) */
+    int8_t tpd, hdir;            /* the direction the step to the POI went; the direction the samples were taken in */
+    uint16_t hdv;                /* bit j: hd[j] is valid */
+    int tga, tgb;                /* the grid gx an arrow in the POI's direction / the other way goes to */
+    float hy[2], hd[NEQ];        /* Y at the newest two samples; Yfn - Yj at the newest */
+    uint8_t hx[2][9];            /* their X */
+    uint8_t pl[9];               /* the last POI's X (pl[0] 0xFF: none) */
     uint16_t pfg;                /* its colour */
     struct dst dr;               /* 2nd DRAW (graph_draw.c) */
+    struct tbl tbl;              /* TABLE (graph_table.c) */
 };
 
 _Static_assert(sizeof(struct gw) <= 0xC00, "gw past GWN");
 _Static_assert(__builtin_offsetof(struct gw, tok) == 304, "main.asm fills tok at 304");
+static uint8_t tb_fall(void);
 static uint8_t dr_foreign(const struct gw *w);
-static void dr_sync(struct gw *w), dr_overlay(void), dr_undo(struct gw *w), dr_prev(struct gw *w);
-static void dr_pick(struct gw *w, uint8_t n), dr_enter(struct gw *w), dr_reset(void);
+static void dr_sync(struct gw *w), dr_overlay(void), dr_undo(struct gw *w), dr_prev(struct gw *w), dr_tpaste(struct gw *w);
+static void dr_pick(struct gw *w, uint8_t n), dr_enter(struct gw *w), dr_reset(void), dr_home(struct gw *w), dtent(struct gw *w);
+static uint8_t mget(int i);
 static void gcoord(uint8_t *out, const uint8_t *base, int g, unsigned d);
 void symce_stoy(const uint8_t *r);
 void symce_stox(const uint8_t *r);
 void symce_fp(unsigned fn, const uint8_t *a, const uint8_t *b, uint8_t *out);
 void symce_fmt(const uint8_t *r, char *out);
+void symce_fmtw(const uint8_t *r, char *out, unsigned width);
+void symce_fmtn(const uint8_t *r, char *out, unsigned width);
+void symce_fill(uint16_t *p, unsigned n, unsigned c);
 void symce_text_(int x, int y, unsigned fg, unsigned bg, const char *s, unsigned big);
 void symce_text(int x, int y, unsigned fg, unsigned bg, const char *s, unsigned big);
 unsigned symce_eval(const uint8_t *tok, unsigned n, uint8_t *out);
 void symce_tok_(const uint8_t *t, char *out);
-static unsigned symce_tok(const uint8_t *t, char *out)
+const uint8_t *symce_sglyph(unsigned c);
+static unsigned tkn(uint8_t b)
 {
     static const uint8_t pre[] = { 0x5C, 0x5D, 0x5E, 0x60, 0x61, 0x62, 0x63, 0x7E, 0xAA, 0xBB, 0xEF, 0 };
+    return b && strchr((const char *)pre, b) ? 2 : 1;  /* the two-byte tokens' first bytes */
+}
+static unsigned symce_tok(const uint8_t *t, char *out)
+{
     symce_tok_(t, out);
-    return strchr((const char *)pre, *t) ? 2 : 1;      /* the two-byte tokens' first bytes */
+    return tkn(*t);
 }
 void symce_dirty(void);
 unsigned symce_calc(unsigned kind, unsigned fn1, const uint8_t *l, const uint8_t *r, const uint8_t *g, unsigned fn2, uint8_t *out);
@@ -179,9 +212,20 @@ static uint8_t nu(const struct gw *w)
     return w->pm == 3 ? 3 : w->pm ? 6 : 10;
 }
 
-static uint8_t have(const struct gw *w, uint8_t i)
+/* Yi is plotted and TRACE / CALC may stand on it (not an implicit one). */
+static uint8_t lenok(const struct gw *w, uint8_t i)
+{
+    return w->len[i] && !(w->imp >> i & 1);
+}
+
+static uint8_t hv(const struct gw *w, uint8_t i)
 {
     return w->pm == 1 ? w->len[2 * i] && w->len[2 * i + 1] : w->len[i];
+}
+
+static uint8_t have(const struct gw *w, uint8_t i)
+{
+    return w->pm == 1 ? hv(w, i) : lenok(w, i);
 }
 
 /* The OS's name byte less 0x10 of slot s (symce_osy adds the 0x10), and the variable the equations' X key reads: X, T, theta. */
@@ -259,13 +303,13 @@ static void emit(struct gw *w, uint8_t op, float k)
         w->err = E_LONG;
         return;
     }
-    if (op == O_K || op == O_X) {
+    if (op <= O_Y) {
         if (w->sp >= STK) {
             w->err = E_DEEP;
             return;
         }
         w->sp++;
-    } else if (op >= O_ADD && op <= O_XOR)
+    } else if (op >= O_ADD && op <= O_MAX)
         w->sp--;
     w->op[w->n] = op;
     w->k[w->n++] = k;
@@ -353,8 +397,16 @@ static void primary(struct gw *w)
         w->err = E_SYN;
     else if (t == vtok(w))                       /* X, or T / theta in Par / Pol */
         emit(w, O_X, 0);
-    else if (t >= 0x41 && t <= 0x5B)
+    else if (t >= 0x41 && t <= 0x5B) {
+        if (t == 0x59) {
+            w->uy = 1;
+            if (w->yop) {
+                emit(w, O_Y, 0);
+                return;
+            }
+        }
         emit(w, O_K, real(w->var[t - 0x41]));
+    }
     else if (t == 0xAC)
         emit(w, O_K, 3.14159265f);
     else if (t == 0xBB && peek(w) == 0x31) {     /* e is BB 31 */
@@ -481,7 +533,12 @@ static void rel(struct gw *w)
     while (!w->err && (t = peek(w)) >= 0x6A && t <= 0x6F) {
         w->p++;
         expr(w);
-        emit(w, (uint8_t)(O_EQ + t - 0x6A), 0);
+        if (w->yop) {                            /* implicit: left - right, or right - left for < <=: >= 0 where it holds */
+            emit(w, O_SUB, 0);
+            if (t == 0x6B || t == 0x6D)
+                emit(w, O_NEG, 0);
+        } else
+            emit(w, (uint8_t)(O_EQ + t - 0x6A), 0);
     }
 }
 
@@ -491,7 +548,7 @@ static void conj(struct gw *w)
     while (!w->err && peek(w) == 0x40) {
         w->p++;
         rel(w);
-        emit(w, O_AND, 0);
+        emit(w, w->yop ? O_MIN : O_AND, 0);
     }
 }
 
@@ -502,26 +559,31 @@ static void disj(struct gw *w)
     while (!w->err && ((t = peek(w)) == 0x3C || t == 0x3D)) {
         w->p++;
         conj(w);
-        emit(w, t == 0x3C ? O_OR : O_XOR, 0);
+        emit(w, t == 0x3C ? (w->yop ? O_MAX : O_OR) : O_XOR, 0);
     }
 }
 
 /* Equation i to w->op / w->k from op b on (Par: Y follows X); returns 0 or an E_ code (w->errtok: the token). */
-static uint8_t compileb(struct gw *w, uint8_t i, uint8_t b)
+static uint8_t compilet(struct gw *w, const uint8_t *t, uint8_t l, uint8_t b)
 {
     w->n = b;
-    w->sp = w->dep = w->err = 0;
+    w->sp = w->dep = w->err = w->uy = 0;
     w->errtok = 0;
-    if (w->len[i] > MAXTOK)
+    if (l > MAXTOK)
         return E_LONG;
-    w->p = w->tok[i];
-    w->e = w->p + w->len[i];
+    w->p = t;
+    w->e = t + l;
     disj(w);
     if (!w->err && w->p < w->e) {                /* something disj() does not take */
         w->err = *w->p == 0x11 ? E_SYN : E_TOK;
         w->errtok = *w->p;
     }
     return w->err;
+}
+
+static uint8_t compileb(struct gw *w, uint8_t i, uint8_t b)
+{
+    return compilet(w, w->tok[i], w->len[i], b);
 }
 
 static uint8_t compile(struct gw *w, uint8_t i)
@@ -537,12 +599,12 @@ __attribute__((noinline)) static float runr(const struct gw *w, uint8_t b0, uint
     float a, b, dg = w->deg ? 0.01745329252f : 1.0f;
     for (uint8_t i = b0; i < b1; i++) {
         uint8_t o = w->op[i];
-        if (o == O_K || o == O_X) {
-            s[sp++] = o == O_K ? w->k[i] : x;
+        if (o <= O_Y) {
+            s[sp++] = o == O_K ? w->k[i] : o == O_X ? x : w->oy;
             continue;
         }
         a = s[sp - 1];
-        if (o <= O_XOR) {                        /* binary */
+        if (o <= O_MAX) {                        /* binary */
             b = a;
             a = s[--sp - 1];
             switch (o) {
@@ -559,6 +621,8 @@ __attribute__((noinline)) static float runr(const struct gw *w, uint8_t b0, uint
             case O_GE:  a = a >= b ? 1.0f : 0.0f; break;
             case O_AND: a = a != 0 && b != 0 ? 1.0f : 0.0f; break;
             case O_OR:  a = a != 0 || b != 0 ? 1.0f : 0.0f; break;
+            case O_MIN: a = a < b ? a : b; break;
+            case O_MAX: a = a > b ? a : b; break;
             default:    a = (a != 0) != (b != 0) ? 1.0f : 0.0f; break;
             }
         } else switch (o) {
@@ -623,7 +687,7 @@ __attribute__((unused)) static int gx2px(int gx)
 
 __attribute__((unused)) static int gy2py(int gy)
 {
-    return ((164 - gy) * 218 + 82) / 164;
+    return ((164 - gy) * PH + 82) / 164;
 }
 
 /* floor(v + 0.5), v clamped: a truncating convert, minus one below zero if it cut something off
@@ -673,13 +737,13 @@ static inline __attribute__((always_inline)) int rowof(float r)
 
 static void put(int x, int y, uint16_t c)
 {
-    if ((unsigned)x < PW && (unsigned)y < PH)
+    if ((unsigned)x < PW && (unsigned)y < SH)
         VRAM[y * VS + x] = c;
 }
 
 static void hline(int y, uint16_t c)
 {
-    if ((unsigned)y < PH)
+    if ((unsigned)y < SH)
         for (int x = 0; x < PW; x++)
             VRAM[y * VS + x] = c;
 }
@@ -687,7 +751,7 @@ static void hline(int y, uint16_t c)
 static void vline(int x, uint16_t c)
 {
     if ((unsigned)x < PW)
-        for (int y = 0; y < PH; y++)
+        for (int y = 0; y < SH; y++)
             VRAM[y * VS + x] = c;
 }
 
@@ -706,8 +770,8 @@ static inline __attribute__((always_inline)) void fillcol(int x, int ya, int yb,
         return;
     if (ya < 0)
         ya = 0;
-    if (yb >= PH)
-        yb = PH - 1;
+    if (yb >= SH)
+        yb = SH - 1;
     for (p = VRAM + ya * VS + x; ya <= yb; ya++, p += VS)
         *p = c;
 }
@@ -731,7 +795,7 @@ static void step(const struct gw *w, int x, int y0, int y1)
     uint16_t pc = w->pc;
     if (y1 >= y0) {
         a = y0, b = y0 + k, c = d ? b + 1 : y0, e = y1;
-        if (w->st == 1 && a >= 0 && e + 1 < PH && (unsigned)x < PW - 2) {   /* all on the plot: no clips */
+        if (w->st == 1 && a >= 0 && e + 1 < SH && (unsigned)x < PW - 2) {   /* all on the plot: no clips */
             uint16_t *p = PX(x, a);
             vfill(p, k + 2, pc);                 /* x: a..b+1 */
             vfill(p + 1, d + 2, pc);             /* x+1: a..e+1 */
@@ -748,7 +812,7 @@ static void step(const struct gw *w, int x, int y0, int y1)
         fillcol(x + 2, c, e, pc);
     } else {
         a = y0 - k, b = y0, c = y1, e = a - 1;
-        if (w->st == 1 && c >= 0 && b + 1 < PH && (unsigned)x < PW - 2) {
+        if (w->st == 1 && c >= 0 && b + 1 < SH && (unsigned)x < PW - 2) {
             uint16_t *p = PX(x, c);
             vfill(PX(x, a), k + 2, pc);          /* x: a..b+1 */
             vfill(p + 1, d + 1, pc);             /* x+1: c..b */
@@ -790,11 +854,11 @@ static void line(const struct gw *w, int x0, int y0, int x1, int y1)
     uint16_t c = w->pc;
     uint8_t th = w->st == 1;
     for (;;) {
-        uint8_t inx = (unsigned)x0 < PW, iny = (unsigned)y0 < PH;
+        uint8_t inx = (unsigned)x0 < PW, iny = (unsigned)y0 < SH;
         if (inx && iny)
             VRAM[ro + x0] = c;
         if (th) {
-            if (inx && (unsigned)(y0 + 1) < PH)
+            if (inx && (unsigned)(y0 + 1) < SH)
                 VRAM[ro + VS + x0] = c;
             if (iny && (unsigned)(x0 + 1) < PW)
                 VRAM[ro + x0 + 1] = c;
@@ -1003,9 +1067,146 @@ __attribute__((noinline)) static void curve(struct gw *w, uint8_t i, uint8_t slo
     }
 }
 
+
+/* ---- implicit equations and inequalities (docs: implicit) ----
+   A Yn that has a Y and is one relation (= < > <= >=), or relations joined by and / or: TI's graph says
+   ERR:INVALID for any Y in an equation, so this replaces nothing it draws. Recompiled with w->yop, every
+   relation is left - right (right - left for < <=) so that f >= 0 where it holds, and/or are min/max, Y is
+   O_Y. f is run at the nodes of an IX x IY grid, two rows at a time; per cell, marching squares draws
+   f = 0 from the linear crossing on each edge (continuous: a shared edge gives the same point to both
+   cells), and an inequality tints the pen colour (1/4 of it over what is there, so overlaps and the axes
+   show through) where f >= 0, the cell's boundary pixels by f's bilinear value, a row at a time. A strict
+   relation (< >) makes the boundary dashed (5 x 4 pixel checks, by segment). */
+static void tint(uint16_t *p, int n, uint16_t q)
+{
+    for (; n > 0; n--, p++) {
+        uint16_t d = *p;
+        *p = (uint16_t)(d - ((d >> 2) & 0x39E7) + q);
+    }
+}
+
+#define I_SH 1                                   /* inequality: tint */
+#define I_SO 2                                   /* solid boundary */
+
+static void icell(struct gw *w, int i, int j, float f0, float f1, float f2, float f3, uint8_t fl)
+{
+    const float dxp = 318.0f / IX, dyp = (float)PH / IY;
+    float x0 = (float)i * dxp, x1 = (float)(i + 1) * dxp, y0 = (float)j * dyp, y1 = (float)(j + 1) * dyp;
+    uint8_t sa = f0 >= 0, sb = f1 >= 0, sc = f2 >= 0, sd = f3 >= 0, n = 0;
+    float qx[4], qy[4], t;
+    if (fl & I_SH) {
+        uint8_t in = sa + sb + sc + sd;
+        int c0 = rnd(x0), c1 = i == IX - 1 ? PW : rnd(x1), r0 = rnd(y0), r1 = j == IY - 1 ? SH : rnd(y1);
+        uint16_t q = (w->pc >> 2) & 0x39E7;
+        if (in == 4)
+            for (int r = r0; r < r1; r++)
+                tint(PX(c0, r), c1 - c0, q);
+        else if (in)
+            for (int r = r0; r < r1; r++) {
+                float v = ((float)r - y0) * (IY / (float)PH), a = f0 + v * (f3 - f0), b = (f1 - f0) + v * ((f2 - f3) - (f1 - f0));
+                int k0 = c0, k1 = c1, k;
+                if (b == 0) {
+                    if (a < 0)
+                        continue;
+                } else {
+                    k = rnd(x0 - a / b * dxp);
+                    if (b > 0)
+                        k0 = k > k0 ? k : k0;
+                    else
+                        k1 = k + 1 < k1 ? k + 1 : k1;
+                }
+                if (k0 < k1)
+                    tint(PX(k0, r), k1 - k0, q);
+            }
+    }
+    if (sa != sb) {
+        t = f0 / (f0 - f1);
+        qx[n] = x0 + t * dxp, qy[n++] = y0;
+    }
+    if (sb != sc) {
+        t = f1 / (f1 - f2);
+        qx[n] = x1, qy[n++] = y0 + t * dyp;
+    }
+    if (sd != sc) {
+        t = f3 / (f3 - f2);
+        qx[n] = x0 + t * dxp, qy[n++] = y1;
+    }
+    if (sa != sd) {
+        t = f0 / (f0 - f3);
+        qx[n] = x0, qy[n++] = y0 + t * dyp;
+    }
+    for (uint8_t k = 0; k < n; k += 2) {         /* two points, or four: round the corner the centre does not join */
+        uint8_t a = k, b = k + 1;
+        if (n == 4) {
+            if (((f0 + f1 + f2 + f3) >= 0) == sa) {   /* a and c joined: cut off b and d */
+                a = k;
+                b = k + 1;
+            } else {
+                a = k ? 1 : 0;
+                b = k ? 2 : 3;
+            }
+        }
+        if (!(fl & I_SO) && (rnd((qx[a] + qx[b]) * 0.1f) + (rnd((qy[a] + qy[b]) * 0.5f) >> 2) & 1))
+            continue;
+        line(w, rnd(qx[a]), rnd(qy[a]), rnd(qx[b]), rnd(qy[b]));
+    }
+}
+
+/* After compile(): 0 if the equation is not implicit, else I_SH (an inequality) | I_SO (no strict relation) | 4. */
+static uint8_t imptype(const struct gw *w)
+{
+    uint8_t fl = 4 | I_SO, rel = 0, eq = 0, last = w->n ? w->op[w->n - 1] : 0;
+    if (!w->uy || (uint8_t)(last - O_EQ) > 4 && last != O_AND && last != O_OR)
+        return 0;
+    for (uint8_t i = 0; i < w->n; i++) {
+        uint8_t o = w->op[i];
+        if (o == O_NE || o == O_XOR || o == O_NOT)
+            return 0;
+        if (o == O_LT || o == O_GT)
+            fl &= ~I_SO;
+        eq += o == O_EQ;
+        rel += o >= O_EQ && o <= O_NE || o == O_AND || o == O_OR;
+    }
+    if (eq && (eq != 1 || rel != 1))
+        return 0;                                /* a lone = is a curve; = beside anything else has no inside */
+    return eq ? fl : fl | I_SH;
+}
+
+__attribute__((noinline)) static void idraw(struct gw *w, uint8_t fl)
+{
+    float dxu = (w->x1 - w->x0) / IX, dyu = (w->y1 - w->y0) / IY;
+    for (int j = 0; j <= IY; j++) {
+        float *cur = w->fr.f[j & 1], *prv = w->fr.f[~j & 1];
+        uint8_t *cc = w->fr.c[j & 1], *pc = w->fr.c[~j & 1];
+        if (OSB(ADDR_ON) & 0x10) {
+            w->brk = 1;
+            return;
+        }
+        w->oy = w->y1 - (float)j * dyu;
+        for (int i = 0; i <= IX; i++) {
+            float f = run(w, w->x0 + (float)i * dxu);
+            volatile float v = f;
+            cur[i] = f;
+            cc[i] = !fin1e30(f) ? 0 : ((volatile uint8_t *)&v)[3] & 0x80 ? 1 : 2;
+        }
+        for (int i = 0; j && i < IX; i++) {
+            uint8_t m = (uint8_t)(pc[i] | pc[i + 1] | cc[i] | cc[i + 1]);
+            if (m == 2 && fl & I_SH && pc[i] && pc[i + 1] && cc[i] && cc[i + 1]) {   /* wholly inside: no boundary, integer bounds (icell's rnd of them) */
+                int c0 = (i * 318 + IX / 2) / IX, c1 = i == IX - 1 ? PW : ((i + 1) * 318 + IX / 2) / IX;
+                int r0 = ((j - 1) * PH + IY / 2) / IY, r1 = j == IY ? SH : (j * PH + IY / 2) / IY;
+                for (int r = r0; r < r1; r++)
+                    tint(PX(c0, r), c1 - c0, (w->pc >> 2) & 0x39E7);
+            } else if (pc[i] && pc[i + 1] && cc[i] && cc[i + 1] && ((fl & I_SH && (m & 2)) || m == 3))
+                icell(w, i, j - 1, prv[i], prv[i + 1], cur[i + 1], cur[i], fl);
+        }
+    }
+}
+
 static void pcurve(struct gw *w, uint8_t p);
 static void pfinish(struct gw *w);
 static void sdraw(struct gw *w);
+static void wdraw(struct gw *w);
+static int webone(const struct gw *w);
 static void splots(struct gw *w);
 static uint8_t sp_state(void);
 static int sp_degen(void);
@@ -1029,7 +1230,7 @@ static void render(struct gw *w)
         w->x1 = w->y1 = 10.0f;
     }
     w->sx = 318.0f / (w->x1 - w->x0);
-    w->sy = 218.0f / (w->y1 - w->y0);
+    w->sy = (float)PH / (w->y1 - w->y0);
     w->xres = xr;
     w->det = !(OSB(ADDR_ASYM) & 1);
     w->brk = 0;
@@ -1039,8 +1240,6 @@ static void render(struct gw *w)
     w->psv = 0;
     dr_sync(w);
     memset(v, 0xFF, (size_t)VS * SH * 2);        /* white; libc's is an ldir */
-    for (int i = PH * VS; i < VS * SH; i++)
-        v[i] = 0xFFFF;                           /* the info bar: the plot's white (BackgroundOn falls back to TI) */
     if (fl & 4)
         grid(w, fl & 0x80, pal(OSB(ADDR_GRIDC)));
     axes(w, pal(OSB(ADDR_AXESC)));
@@ -1051,19 +1250,34 @@ static void render(struct gw *w)
         return;
     }
     splots(w);                                   /* stat plots, under the functions */
-    for (uint8_t i = 0; i < nu(w) && !w->brk; i++) {
-        if (!have(w, i))
-            continue;
-        w->pc = pal(w->col[i]);
-        w->st = style(w, i);
-        if (w->pm) {
-            pcurve(w, i);
-            w->lp = (uint8_t)(i + 1);
-        } else {
-            curve(w, i, compile(w, i) != 0);
-            w->last = (uint8_t)(i + 1);
+    w->imp = 0;
+    for (uint8_t pass = 0; pass < 2; pass++)     /* pass 0: the implicit equations, under the curves */
+        for (uint8_t i = 0; i < nu(w) && !w->brk; i++) {
+            uint8_t e, r;
+            if (!hv(w, i))
+                continue;
+            w->pc = pal(w->col[i]);
+            w->st = style(w, i);
+            if (w->pm) {
+                if (!pass)
+                    continue;
+                pcurve(w, i);
+                w->lp = (uint8_t)(i + 1);
+                continue;
+            }
+            e = compile(w, i);
+            r = e ? 0 : imptype(w);
+            if (r && !pass) {
+                w->imp |= (uint16_t)(1 << i);
+                w->yop = 1;
+                compile(w, i);
+                w->yop = 0;
+                idraw(w, r);
+            } else if (!r && pass) {
+                curve(w, i, e != 0);
+                w->last = (uint8_t)(i + 1);
+            }
         }
-    }
     if (w->brk)
         return;
     dr_overlay();
@@ -1089,13 +1303,41 @@ static void render(struct gw *w)
     }
 }
 
+/* Web: sequence i's formula in b with its own u(n-1) read as X; its length, or 0xFF if there is anything else of the sequences (n, u(n-2), v(n-1)). */
+static uint8_t websub(const struct gw *w, uint8_t i, uint8_t *b)
+{
+    const uint8_t *t = w->tok[i];
+    uint8_t n = 0, l = w->len[i] > MAXTOK ? MAXTOK : w->len[i];
+    for (uint8_t j = 0; j < l;) {
+        if (t[j] == 0x5E && j + 8 <= l && t[j + 1] == 0x80 + i && !memcmp(t + j + 2, "\x10\x62\x21\x71\x31\x11", 6)) {
+            b[n++] = 0x58;
+            j += 8;
+        } else if (t[j] == 0x5E && t[j + 1] >= 0x80 && t[j + 1] < 0x83 || t[j] == 0x62 && t[j + 1] == 0x21)
+            return 0xFF;
+        else {
+            for (uint8_t k = tkn(t[j]); k--;)
+                b[n++] = t[j++];
+        }
+    }
+    return n;
+}
+
 /* Does the OS have to draw this graph? Mode other than Function, a split
    screen, a stat plot, a background image, or a line style this does not draw. */
 uint8_t graph_fall(const struct gw *w)
 {
     uint8_t pm = pmode();
+    if (OSB(0x0D0EF00 + 0xC0A) == 0x20)          /* GWK: the table */
+        return tb_fall();
     if (dr_foreign(w))
         return 1;
+    if (OSB(0x0D0EF00 + 0xC0A) == 0xF5) {        /* DRAW Tangent(: SymCE's in Function mode with a function and no stat plot, else TI's */
+        uint8_t i = 0;
+        while (i < 10 && !have(w, i))
+            i++;
+        if (pm || sp_state() || i == 10)
+            return 1;
+    }
     if ((OSB(ADDR_SG) & 7) || OSB(ADDR_BGIMG))
         return 1;
     if (sp_state() > 3 || (pm == 3 && sp_state()))   /* a plot TI draws; in Seq mode every plot is TI's */
@@ -1107,19 +1349,32 @@ uint8_t graph_fall(const struct gw *w)
             return 1;
     }
     if (pm == 3) {                               /* Seq: Time format, explicit terms, dots (slice 1) */
-        if (OSB(ADDR_SEQF) & 0x1D)
-            return 1;                            /* ponytail: Web, uv, vw, uw */
+        uint8_t f = OSB(ADDR_SEQF);
+        if (f & 1) {                             /* Web: TI says INVALID for n, u(n-2), another sequence: its screen */
+            uint8_t b[MAXTOK];
+            for (uint8_t i = 0; i < 3; i++) {
+                uint8_t l = w->len[i] ? websub(w, i, b) : 0;
+                /* compilet clobbers w->op/k/n..., which no one reads across calls: render, wdraw, CALC and DRAW each compile before they run */
+                if (w->len[i] && ((OSB(0x0D0EF00 + 0xC07) == 0x5A && !webone(w)) || OSB(0x0D0EF00 + 0xC0A) == 0xFE || l == 0xFF || compilet((struct gw *)w, b, l, 0)))
+                    return 1;                    /* (a handed menu key: TI's TRACE and zooms; ponytail) */
+            }
+        }
+        if (f & 0x1C) {                          /* uv, vw, uw: both terms, and TI's own TRACE and menus */
+            uint8_t a = f & 4 ? 0 : 1, b = f & 16 ? 2 : f & 4 ? 1 : 2;
+            if (!w->len[a] || !w->len[b] || OSB(0x0D0EF00 + 0xC07) == 0x5A)
+                return 1;
+        }
         for (uint8_t i = 0; i < 3; i++)
             if (w->len[i]) {
                 if (OSB(0x0D024D5 + i) != 6)
                     return 1;                    /* ponytail: TI's line styles */
-                for (uint8_t j = 0; j + 1 < w->len[i] && j < MAXTOK; j++)
+                for (uint8_t j = 0; !(f & 1) && j + 1 < w->len[i] && j < MAXTOK; j++)
                     if (w->tok[i][j] == 0x5E && (uint8_t)(w->tok[i][j + 1] - 0x80) < 3 &&
                         (j + 8 > w->len[i] || memcmp(w->tok[i] + j + 2, "\x10\x62\x21\x71\x31\x11", 6)))
                         return 1;                /* ponytail: only u(n-1) (u(n-2) hangs the OS's SeqSolve step) */
             }
     }
-    if (pm && OSB(0x0D0EF00 + 0xC0A) == 0xDA)    /* GWK: ZoomFit (0xD0 + Z_FIT; ponytail: not done for Par, Pol yet) */
+    if (pm == 3 && OSB(0x0D0EF00 + 0xC0A) == 0xDA)    /* GWK: ZoomFit (0xD0 + Z_FIT; ponytail: not done for Seq) */
         return 1;
     for (uint8_t i = 0; i < (pm == 3 ? 0 : pm ? 6 : 10); i++)
         if (pm == 1 ? w->len[2 * i] && w->len[2 * i + 1] : w->len[i]) {
@@ -1157,7 +1412,7 @@ enum { M_PLAIN, M_FREE, M_TRACE, M_ENTRY };
 #define SMAX   28                /* ... and under a CALC title and label */
 #define BLINK  10500             /* ticks: 320 ms a frame */
 #define HOLD   16384             /* a held arrow repeats after 0.5 s ... */
-#define REPT   3015              /* ... every 92 ms */
+#define REPT   3277              /* ... every 100 ms (TI's, measured) */
 
 static unsigned now(void)
 {
@@ -1229,7 +1484,7 @@ static void gcoord(uint8_t *out, const uint8_t *base, int g, unsigned d)
 }
 
 static int gpx(int gx) { return (gx * 318 + 132) / 264; }
-static int gpy(int gy) { return ((164 - gy) * 218 + 82) / 164; }
+static int gpy(int gy) { return ((164 - gy) * PH + 82) / 164; }
 
 /* gpx and gpy for points off the grid (a Par or Pol curve leaves the window): floor, not truncation. */
 static int fdiv(int n, int d)
@@ -1240,7 +1495,7 @@ static int fdiv(int n, int d)
 /* A segment between pixel points that may be far off the plot: Liang-Barsky to a few pixels around it, then line(). */
 static void pseg(const struct gw *w, int xa, int ya, int xb, int yb)
 {
-    const int lx = -3, hx = PW + 2, ly = -3, hy = PH + 2;
+    const int lx = -3, hx = PW + 2, ly = -3, hy = SH + 2;
     float t0 = 0, t1 = 1, dx = (float)(xb - xa), dy = (float)(yb - ya);
     float p[4], q[4];
     if ((xa < lx && xb < lx) || (xa > hx && xb > hx) || (ya < ly && yb < ly) || (ya > hy && yb > hy))
@@ -1296,6 +1551,18 @@ static int sstart(void)
     return ival(ADDR_NMIN) + (ival(ADDR_PSTART) > 1 ? ival(ADDR_PSTART) - 1 : 0);   /* PlotStart counts terms from nMin */
 }
 
+/* Seq, Web format: the trace is the cobweb. */
+static int webt(const struct gw *w)
+{
+    return w->pm == 3 && (OSB(ADDR_SEQF) & 1);
+}
+
+/* One sequence defined, nMin..: the only Web TRACE SymCE does (more sequences, a PlotStart or PlotStep: TI's, measured only for this). */
+static int webone(const struct gw *w)
+{
+    return (w->len[0] > 0) + (w->len[1] > 0) + (w->len[2] > 0) == 1 && sstart() == ival(ADDR_NMIN) && ival(ADDR_PSTEP) == 1;
+}
+
 /* The last step k with min + k step <= max, by the OS's own division (powf is not exact enough for 360 / 7.5). */
 static int tn(uint32_t a)
 {
@@ -1349,7 +1616,7 @@ __attribute__((noinline)) static void pcurve(struct gw *w, uint8_t p)
         x = (x - w->x0) * kx;
         y = (y - w->y0) * ky;
         px = fdiv(rnd(x) * 318 + 132, 264);
-        py = fdiv((164 - rnd(y)) * 218 + 82, 164);
+        py = fdiv((164 - rnd(y)) * PH + 82, 164);
         if (haveprev)
             pseg(w, pxo, pyo, px, py);
         else
@@ -1407,24 +1674,55 @@ static unsigned sterm(struct gw *w, int n)
             return e;
         w->sn = ival(ADDR_NMIN);
     }
-    if (n > w->sn) {
-        itor(n, r);
+    while (n > w->sn) {                          /* Web: one term at a time (the recursion has u(n-1) from the call before); else the OS runs up to n */
+        int t = webt(w) ? w->sn + 1 : n;
+        itor(t, r);
         if ((e = symce_seq(1, r))) {
             w->sn = -1;
             return e;
         }
-        w->sn = n;
+        w->sn = t;
     }
     return 0;
+}
+
+/* Seq, Web format: each sequence's formula as a curve of X (u(n-1) is X), in its colour, and after each Y = X in black. After it X is
+   the column before the last, Y the last curve's value there (as for a function, 263 and not 264 DeltaX). */
+__attribute__((noinline)) static void wdraw(struct gw *w)
+{
+    uint8_t b[MAXTOK], l, last = 0, x[9], r[9];
+    for (uint8_t i = 0; i < 3 && !w->brk; i++)
+        if (have(w, i) && (l = websub(w, i, b)) != 0xFF && !compilet(w, b, l, 0)) {
+            w->pc = pal(w->col[i]);
+            curve(w, i, 0);
+            w->op[0] = O_X;                      /* Y = X after each curve, over it (TI's, measured: u over v's crossing shows v) */
+            w->n = 1;
+            w->pc = pal(3);
+            w->st = 0;
+            curve(w, 0, 0);
+            last = (uint8_t)(i + 1);
+        }
+    if (w->brk)
+        return;
+    gcoord(x, (const uint8_t *)0x0D01E33, 263, 0x0D01FAE);
+    symce_stox(x);
+    if (last && (l = websub(w, (uint8_t)(last - 1), b)) != 0xFF && !symce_eval(b, l, r))
+        symce_stoy(r);
 }
 
 __attribute__((noinline)) static void sdraw(struct gw *w)
 {
     int nmin = ival(ADDR_NMIN), nmax = ival(ADDR_NMAX), p0 = sstart(), ps = ival(ADDR_PSTEP);
     float kx = 264.0f / (w->x1 - w->x0), ky = 164.0f / (w->y1 - w->y0);
-    uint8_t r[9], ly[9];
+    uint8_t r[9], ly[9], lx[9];
     int ln = -1;
     unsigned e = 0;
+    uint8_t f = OSB(ADDR_SEQF) & 0x1C;
+    if (OSB(ADDR_SEQF) & 1) {
+        wdraw(w);
+        return;
+    }
+    const uint8_t *ax = f == 4 ? (const uint8_t *)"\0\1" : f == 8 ? (const uint8_t *)"\1\2" : f == 16 ? (const uint8_t *)"\0\2" : 0;
     w->sn = -1;
     if (ps < 1 || nmax < nmin)
         return;
@@ -1437,6 +1735,22 @@ __attribute__((noinline)) static void sdraw(struct gw *w)
         }
         if (n < p0 || (n - p0) % ps)
             continue;
+        if (ax) {                                /* uv, vw, uw: a dot at (first term, second term), in the second one's colour */
+            uint32_t a0 = ADDR_SEQV + 18 * ax[0], a1 = ADDR_SEQV + 18 * ax[1];
+            float x, y;
+            if ((OSB(a0) & 0x1F) || (OSB(a1) & 0x1F))
+                continue;
+            x = real((const uint8_t *)a0);
+            y = real((const uint8_t *)a1);
+            if (!fin1e30(x) || !fin1e30(y))
+                continue;
+            ln = n;
+            memcpy(lx, (const void *)a0, 9);
+            memcpy(ly, (const void *)a1, 9);
+            w->pc = pal(w->col[ax[1]]);
+            block(fdiv(rnd((x - w->x0) * kx) * 318 + 132, 264), fdiv((164 - rnd((y - w->y0) * ky)) * PH + 82, 164), 1, w->pc);
+            continue;
+        }
         for (uint8_t i = 0; i < 3; i++) {
             uint32_t a = ADDR_SEQV + 18 * i;
             float y;
@@ -1448,11 +1762,14 @@ __attribute__((noinline)) static void sdraw(struct gw *w)
             if (!fin1e30(y))
                 continue;
             w->pc = pal(w->col[i]);
-            block(fdiv(rnd(((float)n - w->x0) * kx) * 318 + 132, 264), fdiv((164 - rnd((y - w->y0) * ky)) * 218 + 82, 164), 1, w->pc);
+            block(fdiv(rnd(((float)n - w->x0) * kx) * 318 + 132, 264), fdiv((164 - rnd((y - w->y0) * ky)) * PH + 82, 164), 1, w->pc);
         }
     }
     if (ln >= 0) {                               /* TI leaves X = the last n plotted, Y = its term (the last sequence's) */
-        itor(ln, r);
+        if (ax)
+            memcpy(r, lx, 9);                    /* uv, vw, uw: X is the first term */
+        else
+            itor(ln, r);
         symce_stox(r);
         symce_stoy(ly);
     }
@@ -1483,7 +1800,7 @@ static void cshow(struct gw *w)
     for (int j = 0; j < 9; j++)
         for (int i = 0; i < 9; i++) {
             int x = w->cx - 4 + i, y = w->cy - 4 + j;
-            w->sv[j * 9 + i] = (unsigned)x < PW && (unsigned)y < PH ? VRAM[y * VS + x] : 0xFFFF;
+            w->sv[j * 9 + i] = (unsigned)x < PW && (unsigned)y < SH ? VRAM[y * VS + x] : 0xFFFF;
         }
     cdraw(w);
     w->shown = 1;
@@ -1519,26 +1836,51 @@ static void plain(struct gw *w)
     w->dr.dm = 0;
     w->cm = w->cs = w->cres = 0;
     w->ptb[0] = w->ptc[0] = 0;
-    w->psv = 0;
+    w->psv = w->tps = 0;
 }
 
-/* The prompt or result line, TI's, over the foot of the plot (5 rows, saved in PBUF), and
-   the rest of it on the border. Redrawn by bar(), so it survives the cursor moving. */
-#define PBUF ((uint16_t *)0x0D0FB20)
+/* The prompt or result line, TI's, over the foot of the plot (PBR rows, 12 = the small font's cell), saved in PBUF a
+   byte a pixel: a palette index, or 16 + the index for that colour's shade over white. shortcut: a pixel that is
+   neither (two shades overlapping, a shade over a curve) comes back white; upgrade: a second byte plane.
+   Redrawn by bar(), so it survives the cursor moving. */
+#define PBUF ((uint8_t *)0x0D0FB20)
 #define PBX 20
-#define PBW 200
+#define PBW 168
+#define PBR 12
 #define PY 214
+_Static_assert(0x0D0FB20 + PBR * PBW <= 0x0D10300, "PBUF overflows into SB");
+static uint16_t pshade(uint8_t i) { return (uint16_t)(0xC618 + ((pal(i) >> 2) & 0x39E7)); }
+static void pbuf(int save)
+{
+    uint16_t t[32];                              /* the 16 colours, then their shades over white (built once: a pass is 2016 pixels) */
+    for (uint8_t i = 0; i < 16; i++) {
+        t[i] = pal(i);
+        t[16 + i] = pshade(i);
+    }
+    for (int y = 0; y < PBR; y++) {
+        uint16_t *v = VRAM + (PY + y) * VS + PBX;
+        uint8_t *u = PBUF + y * PBW;
+        for (int x = 0; x < PBW; x++) {
+            if (!save)
+                v[x] = t[u[x] & 31];
+            else {
+                uint8_t q = 11;
+                if (v[x] != 0xFFFF)
+                    for (uint8_t i = 0; i < 32; i++)
+                        if (t[i] == v[x]) {
+                            q = i;
+                            break;
+                        }
+                u[x] = q;
+            }
+        }
+    }
+}
 static void pdraw(struct gw *w)
 {
     if (!w->ptb[0])
         return;
-    for (int y = 0; y < 5; y++) {
-        uint16_t *v = VRAM + (PY + y) * VS + PBX;
-        if (w->psv)
-            memcpy(v, PBUF + y * PBW, PBW * 2);
-        else
-            memcpy(PBUF + y * PBW, v, PBW * 2);
-    }
+    pbuf(w->psv == 0);
     w->psv = 1;
     symce_text(28, PY, w->pfg, 0xFFFF, w->ptb, 0);
 }
@@ -1572,24 +1914,43 @@ static void bar(struct gw *w)
             w->pfg = fg;
         }
     }
-    fill(PH, SH, b);
+    if (w->mode == M_TRACE && webt(w))
+        xs = w->pxv;                             /* Web: n= over the cobweb's X= Y= */
     pdraw(w);
     if (w->pm && w->cres == 3)                   /* a Par, Pol derivative: its line alone (TI) */
         return;
     if (OSB(ADDR_DB) & 0x10)                     /* CoordOff */
         return;
     if (w->ptc[0]) {                             /* the integral: its limits instead */
-        symce_text(26, BARY, fg, b, w->ptc, 0);   /* TI starts this line 2 px left (measured) */
+        char tc[40];
+        unsigned l = strlen(w->ptc);
+        memcpy(tc, w->ptc, l + 1);
+        while (l < 30 && l < sizeof(tc) - 1)
+            tc[l++] = ' ';
+        tc[l] = 0;
+        symce_text(26, BARY, fg, b, tc, 0);   /* TI starts this line 2 px left (measured) */
         return;
     }
     s[0] = polar && (w->mode == M_FREE || (w->pm == 2 && w->mode == M_TRACE)) ? 'R' : 'X';
     s[1] = '=';
     symce_fmt(xs, s + 2);
+    {
+        unsigned l = strlen(s);
+        while (l < 15 && l < sizeof(s) - 1)
+            s[l++] = ' ';
+        s[l] = 0;
+    }
     symce_text(28, BARY, fg, b, s, 0);
     s[0] = polar && (w->mode == M_FREE || (w->pm == 2 && w->mode == M_TRACE)) ? 0x5B : 'Y';
     s[2] = 0;
     if (w->mode == M_FREE || w->yok)
         symce_fmt(ys, s + 2);
+    {
+        unsigned l = strlen(s);
+        while (l < 15 && l < sizeof(s) - 1)
+            s[l++] = ' ';
+        s[l] = 0;
+    }
     symce_text(162, BARY, fg, b, s, 0);
 }
 
@@ -1623,9 +1984,15 @@ static void sbrest(int y, int xa, int xb)       /* columns xa..xb-1 of row y bac
     for (int x = xa; x < xb && x < PW; x++)
         VRAM[y * VS + x] = nget(SB, y * PW + x);
 }
+/* The title line over the label: a CALC's, or DRAW Tangent('s (TI's header). */
+static const char *ttit(const struct gw *w)
+{
+    return w->cm >= 2 ? ctit[w->cm] : w->dr.dm == D_TANG ? "DRAW TANGENT" : 0;
+}
+
 static void labsave(struct gw *w)
 {
-    w->sr = w->cm >= 2 ? SMAX : STRIP;
+    w->sr = ttit(w) ? SMAX : STRIP;
     for (int y = 0; y < w->sr; y++)
         for (int x = 0; x < PW; x++)
             nset(SB, y * PW + x, VRAM[y * VS + x]);
@@ -1645,6 +2012,8 @@ static int tcount(const struct gw *w)
 {
     uint32_t a = tbase(w);
     float t0, t1, ts;
+    if (webt(w))
+        return 1 << 20;                          /* no nMax: TI's cobweb walks on */
     if (w->pm == 3) {
         int p = ival(ADDR_PSTEP);
         return p < 1 || ival(ADDR_NMAX) < sstart() ? 0 : (ival(ADDR_NMAX) - sstart()) / p;
@@ -1739,7 +2108,7 @@ static int pswap(struct gw *w, int dir)
     if (!plots)
         return 0;
     for (uint8_t i = 0; i < NEQ; i++)
-        if (w->len[i])
+        if (lenok(w, i))
             ids[n++] = (uint8_t)(3 + i);
     for (uint8_t i = 0; i < n; i++)
         if (ids[i] == (w->pt ? w->pt - 1 : 3 + w->fn))
@@ -1775,8 +2144,8 @@ static void tlabel(struct gw *w)
     }
     for (int y = 0; y < w->sr; y++)
         sbrest(y, 0, PW);
-    if (w->cm >= 2) {
-        symce_text(3, 1, 0, 0xFFFF, ctit[w->cm], 0);
+    if (ttit(w)) {
+        symce_text(3, 1, 0, 0xFFFF, ttit(w), 0);
         ly = 15;
     }
     OSB(0x0D01474) = (uint8_t)(w->fn + 1);       /* the OS's traced function: CALC and TI's own screens read it */
@@ -1850,7 +2219,7 @@ static void tshow(struct gw *w)
     if (w->yok) {
         float f = (real(w->yv) - real_os(ADDR_YMIN)) / real_os(ADDR_DY);
         symce_stoy(w->yv);
-        if (f > -0.5f && f < 164.5f) {           /* ponytail: the rounded row must be 0..164 */
+        if (f > -0.5f && f < 164.5f && w->gx >= 0 && w->gx <= 264) { /* ponytail: the rounded row must be 0..164 */
             w->vis = 1;
             w->gy = rnd(f);
         }
@@ -1870,6 +2239,155 @@ static void tcalc(struct gw *w)
     tshow(w);
 }
 
+/* ---- TRACE snap: a step that passes a zero, Y-intercept, intersection, minimum or maximum stops on it ----
+   Settings item 6 (asm_Flag2 bit 4 set = off). Function mode only. The samples are the grid points the cursor has stood on. */
+static uint8_t snapon(const struct gw *w)
+{
+    return !w->pm && !w->pt && !w->cm && w->dr.dm != D_TANG && !(OSB(0x0D000A2) & 0x10);
+}
+
+/* No samples, no last POI. */
+static void thist0(struct gw *w)
+{
+    w->hn = 0;
+    w->pl[0] = 0xFF;
+}
+
+/* Y of Yf at x; 0 if undefined. */
+static uint8_t tyat(struct gw *w, uint8_t f, const uint8_t *x, float *y)
+{
+    uint8_t t[9];
+    if (symce_osy(osn(w, f), x, t, vtok(w)))
+        return 0;
+    *y = real(t);
+    return 1;
+}
+
+/* The POI label off: the plot rows under it back. */
+static void tunpoi(struct gw *w)
+{
+    if (!w->tps)
+        return;
+    chide(w);
+    if (w->psv)
+        pbuf(0);
+    w->psv = w->tps = 0;
+    w->ptb[0] = 0;
+}
+
+/* The OS solver (kind 1 zero, 2 min, 3 max, 4 intersect with Yj) between the TI reals a and b; the root in out. */
+static uint8_t tsolve(struct gw *w, unsigned kind, unsigned j, const uint8_t *a, const uint8_t *b, uint8_t *out)
+{
+    uint8_t g[9];
+    const uint8_t *l = real(a) < real(b) ? a : b, *r = l == a ? b : a;
+    float lo = real(l), hi = real(r), x, e = 1e-3f * real_os(ADDR_DX);
+    memcpy(g, w->xv, 9);
+    if (symce_calc(kind, w->fn, l, r, g, j, out))
+        return 0;
+    x = real(out);
+    return x >= lo - e && x <= hi + e;           /* (the minimum / maximum solver runs off along a pole) */
+}
+
+/* The step to the new X (w->xv, w->yv are there) in direction dir: look for the POI nearest the old sample, show it if there is one. */
+static void tpoi(struct gw *w, int dir)
+{
+    uint8_t br[9], r[9], zero[9], bn = 0, sol = 0;
+    const char *nm = 0;
+    float xn = real(w->xv), xo, yn, ym, y2, yr, d[NEQ], best = 1e30f, dx = real_os(ADDR_DX), dy = real_os(ADDR_DY);
+    uint16_t dm = 0;
+    if (w->hn && (xn - real(w->hx[0])) * dir <= 0)
+        return;                                  /* walking back over samples already seen (after a POI that was behind the cursor) */
+    if (!w->yok) {
+        w->hn = 0;
+        return;
+    }
+    yn = real(w->yv);
+    for (uint8_t j = 0; j < NEQ; j++)
+        if (j != w->fn && have(w, j) && tyat(w, j, w->xv, &y2)) {
+            d[j] = yn - y2;
+            dm |= 1 << j;
+        }
+    if (w->hn && w->hdir != dir && w->hn > 1)
+        w->hn = 1;                               /* a reversal: the older sample is on the other side */
+    if (w->hn) {
+        xo = real(w->hx[0]);
+        ym = w->hy[0];
+#define TCAND(root, name, id)                                                         \
+        do {                                                                          \
+            float dd = fabsf(real(root) - xo);                                        \
+            if (dd < best - 1e-3f * dx && (w->pl[0] == 0xFF || fabsf(real(root) - real(w->pl)) > dx)) { \
+                best = dd;                                                            \
+                memcpy(br, root, 9);                                                  \
+                nm = name;                                                            \
+                bn = id;                                                              \
+            }                                                                         \
+        } while (0)
+        if (ym * yn < 0 || yn == 0) {            /* a zero; an asymptote jumps over the axis: Y at the root is far from 0 */
+            if (yn == 0)
+                memcpy(r, w->xv, 9);
+            else
+                sol = 1;
+            if ((yn == 0 || tsolve(w, 1, 0, w->hx[0], w->xv, r)) && tyat(w, w->fn, r, &yr) && fabsf(yr) <= dy)
+                TCAND(r, "Zero", 1);
+        }
+        if (dir > 0 ? xo < 0 && xn >= 0 : xn <= 0 && xo > 0) {   /* the Y axis */
+            itor(0, zero);
+            if (tyat(w, w->fn, zero, &yr))
+                TCAND(zero, "Y-intercept", 2);
+        }
+        for (uint8_t j = 0; j < NEQ; j++)
+            if ((dm & w->hdv) >> j & 1 && (w->hd[j] * d[j] < 0 || d[j] == 0)) {
+                float y1;
+                if (d[j] == 0)
+                    memcpy(r, w->xv, 9);
+                else
+                    sol = 1;
+                if ((d[j] == 0 || tsolve(w, 4, j, w->hx[0], w->xv, r)) && tyat(w, w->fn, r, &y1) && tyat(w, j, r, &yr) && fabsf(y1 - yr) <= dy)
+                    TCAND(r, "Intersection", 3);
+            }
+        if (w->hn > 1 && (w->hy[0] - w->hy[1]) * (yn - ym) < 0) {   /* the slope changed sign over three samples */
+            float hi = yn > ym ? yn : ym, lo = yn < ym ? yn : ym;
+            uint8_t mx = yn < ym;
+            hi = hi > w->hy[1] ? hi : w->hy[1];
+            lo = lo < w->hy[1] ? lo : w->hy[1];
+            sol = 1;
+            if (tsolve(w, mx ? 3 : 2, 0, w->hx[1], w->xv, r) && tyat(w, w->fn, r, &yr) && yr <= hi + (hi - lo) && yr >= lo - (hi - lo) &&
+                (mx ? yr >= hi - dy : yr <= lo + dy) && yr >= real_os(ADDR_YMIN) && yr <= real_os(ADDR_YMIN + 9))   /* (a pole's "extremum" runs off the window) */
+                TCAND(r, mx ? "Maximum" : "Minimum", 4);
+        }
+    }
+    w->hn += w->hn < 2;
+    w->hdir = (int8_t)dir;
+    memcpy(w->hx[1], w->hx[0], 9);
+    memcpy(w->hx[0], w->xv, 9);
+    w->hy[1] = w->hy[0];
+    w->hy[0] = yn;
+    memcpy(w->hd, d, sizeof d);
+    w->hdv = dm;
+    if (bn) {
+        float u = (real(br) - real_os(ADDR_XMIN)) / dx, k = u / 2;
+        int c = (int)floorf(k + 0.5f);
+        if (fabsf(k - (float)c) < 1e-4f) {       /* on a grid point: the next one on either side */
+            w->tga = 2 * (c + dir);
+            w->tgb = 2 * (c - dir);
+        } else {
+            c = (int)floorf(k);                  /* (k is no integer: the grid points around it are c and c + 1) */
+            w->tga = 2 * (dir > 0 ? c + 1 : c);
+            w->tgb = 2 * (dir > 0 ? c : c + 1);
+        }
+        w->tpd = (int8_t)dir;
+        memcpy(w->xv, br, 9);
+        w->gx = rnd(u);
+        w->gx = w->gx < 0 ? 0 : w->gx > 264 ? 264 : w->gx;
+        strcpy(w->ptb, nm);
+        w->pfg = pal(w->col[w->fn]);
+        w->tps = 1;
+        memcpy(w->pl, br, 9);
+    }
+    if (sol || bn)
+        tshow(w);                                /* the solver left its X in X; the POI, or the grid point, put back */
+}
+
 /* The label's text s[0..n) at x on the strip, TI's way: characters while the pen stays within 123 of x, else the ellipsis (measured). */
 static void ltext(int x, int y, uint16_t fg, const char *s, int n)
 {
@@ -1882,7 +2400,7 @@ static void ltext(int x, int y, uint16_t fg, const char *s, int n)
     }
     if (px <= cap)
         return;
-    for (int r = y; r < y + 12 && r < PH; r++)
+    for (int r = y; r < y + 12 && r < SH; r++)
         sbrest(r, x, px + 8);
     for (m = 0; m < n && pen[m] <= cap; m++)
         ;
@@ -1937,13 +2455,76 @@ static void ptlabel(struct gw *w)
     plab(w, 135, (uint8_t)(0x21 + 2 * w->fn), (uint8_t)(2 * w->fn + 1), ly);
 }
 
+/* Web step s (the cobweb): 0 is (u(nMin), 0) at n = nMin; 2j-1 is (u(nMin+j-1), u(nMin+j)), on the curve; 2j is (u(nMin+j), u(nMin+j)), on
+   y = x; both at n = nMin + j. 1 if the terms are defined. */
+static int webvals(struct gw *w, int s, int *n, uint8_t *x, uint8_t *y)
+{
+    uint32_t a = ADDR_SEQV + 18 * w->fn;
+    int j = (s + 1) / 2, m = ival(ADDR_NMIN), ok;
+    *n = m + j;
+    ok = !sterm(w, s ? m + j - (s & 1) : m) && !(OSB(a) & 0x1F);
+    memcpy(x, (const void *)a, 9);
+    if (!s)
+        itor(0, y);
+    else if (s & 1) {
+        ok = ok && !sterm(w, m + j) && !(OSB(a) & 0x1F);
+        memcpy(y, (const void *)a, 9);
+    } else
+        memcpy(y, x, 9);
+    return ok;
+}
+
+/* The pixel of Web step s on the plot (the cursor's grid rounding; far off the window is clamped by rnd), and its n, X, Y. */
+static int webpix(struct gw *w, int s, int *px, int *py, int *n, uint8_t *x, uint8_t *y)
+{
+    if (!webvals(w, s, n, x, y))
+        return 0;
+    *px = fdiv(rnd((real(x) - real_os(ADDR_XMIN)) / real_os(ADDR_DX)) * 318 + 132, 264);
+    *py = fdiv((164 - rnd((real(y) - real_os(ADDR_YMIN)) / real_os(ADDR_DY))) * PH + 82, 164);
+    return 1;
+}
+
+/* The cobweb's segments up to step tk, from where zx (the last step drawn) left off: 1 px, in the sequence's colour (the cursor is hidden).
+   They stay. The terms only go up, so the solver is not restarted; the last step's n, X, Y come back. */
+static int webseg(struct gw *w, int *n, uint8_t *x, uint8_t *y)
+{
+    int ax = w->zr[0], ay = w->zr[1], bx, by, a = w->zr[2], ok = 0;   /* (zr: the pixel of step zx, if known) */
+    w->pc = pal(w->col[w->fn]);
+    w->st = 0;
+    w->sn = -1;                                  /* (the OS forgets u(n-1) between keys: start again, the terms then go up) */
+    if (!a)
+        a = webpix(w, w->zx, &ax, &ay, n, x, y);
+    for (int s = w->zx + 1; s <= w->tk; s++) {
+        ok = webpix(w, s, &bx, &by, n, x, y);
+        if (a == 2) {                            /* from the x axis under this step */
+            a = ok;
+            ax = bx;
+            ay = fdiv((164 - rnd((0 - real_os(ADDR_YMIN)) / real_os(ADDR_DY))) * PH + 82, 164);
+        }
+        if (ok && a)
+            pseg(w, ax, ay, bx, by);
+        a = ok;
+        ax = bx;
+        ay = by;
+    }
+    w->zx = w->tk;
+    w->zr[0] = ax;
+    w->zr[1] = ay;
+    w->zr[2] = a;
+    return ok;
+}
+
 /* The point at xv (the T or theta): X, Y (and R) by the OS parser, stored as TI stores them; the cursor on its pixel. */
 static void ptshow(struct gw *w)
 {
     uint8_t sx = w->pm == 2 ? w->fn : (uint8_t)(2 * w->fn), x[9], y[9];
     chide(w);
     w->vis = 0;
-    if (w->pm == 3) {                            /* Seq: the OS's term (X = n) */
+    if (webt(w)) {                               /* Web step tk: n, X, Y; the segments not yet drawn */
+        int n;
+        w->yok = w->tk > w->zx ? webseg(w, &n, x, y) : webvals(w, w->tk, &n, x, y);   /* (the OS's solver leaves X and Y of its own: before they are stored) */
+        itor(n, w->xv);
+    } else if (w->pm == 3) {                     /* Seq: the OS's term (X = n) */
         uint32_t a = ADDR_SEQV + 18 * w->fn;
         memcpy(x, w->xv, 9);
         w->yok = !sterm(w, (int)(real(x) + 0.5f)) && !(OSB(a) & 0x1F);
@@ -1983,7 +2564,14 @@ static void ptmove(struct gw *w, int dir)
     int n = tcount(w), k = w->tk + dir;
     if (w->snap) {                               /* a typed T: the step nearest it, then one more */
         uint8_t t[9];
-        if (w->pm == 3)
+        if (webt(w)) {                           /* TI's measured step after a typed n: twice the step on the right, one back on the left */
+            k = dir > 0 ? 2 * w->tk + !w->tk : w->tk - 1;   /* (n = nMin: ponytail, unmeasured) */
+            if (dir > 0 && k > 0) {              /* it draws only the last two segments, the first from the x axis up (measured) */
+                w->zx = k - 2;
+                w->zr[2] = 2;
+            }
+        }
+        else if (w->pm == 3)
             k = (int)floorf((real(w->xv) - sstart()) / ival(ADDR_PSTEP) + 0.5f) + dir;
         else {
             symce_fp(FP_SUB, w->xv, (const uint8_t *)tbase(w), t);
@@ -2036,7 +2624,7 @@ static void tpan(struct gw *w, int dir)
 static void tstart(struct gw *w)
 {
     uint8_t i = 0, n = w->pm ? nu(w) : NEQ, p = 0;
-    while (i < n && !(w->pm ? have(w, i) : w->len[i]))
+    while (i < n && !have(w, i))
         i++;
     while (!w->pm && p < 3 && !(OSB(SPREC(p) + SP_ON) & 1))
         p++;
@@ -2053,7 +2641,10 @@ static void tstart(struct gw *w)
     w->gx = 132;
     w->pn = 0;
     w->snap = 0;
-    w->tk = 0;
+    w->tps = 0;
+    thist0(w);
+    w->hx[0][0] = 0xFF;                          /* (no sample is the next X) */
+    w->tk = w->zx = w->zr[2] = 0;
     if (w->pm)
         tset(w, 0);
     memcpy(w->x0r, (const void *)ADDR_XMIN, 9);
@@ -2072,27 +2663,39 @@ static void tmove(struct gw *w, int dir)
         ptmove(w, dir);
         return;
     }
-    if (w->snap) {
-        uint8_t t[9];
-        float u;
-        symce_fp(FP_SUB, w->xv, (const uint8_t *)ADDR_XMIN, t);
-        symce_fp(FP_DIV, t, (const uint8_t *)ADDR_DX, t);
-        u = real(t) / 2.0f;                      /* in TraceStep units (= 2 DeltaX) */
-        w->gx = 2 * (int)floorf(u + 0.5f);
-        w->pn = 0;
-        w->snap = 0;
-        memcpy(w->x0r, (const void *)ADDR_XMIN, 9);
+    if (w->tps) {                                /* standing on a POI: the grid point next to it, in the direction pressed */
+        w->gx = dir == w->tpd ? w->tga : w->tgb;
+        if (dir != w->tpd)
+            thist0(w);                           /* (the samples are on the other side) */
+        tunpoi(w);
+    } else {
+        if (w->snap) {
+            uint8_t t[9];
+            float u;
+            symce_fp(FP_SUB, w->xv, (const uint8_t *)ADDR_XMIN, t);
+            symce_fp(FP_DIV, t, (const uint8_t *)ADDR_DX, t);
+            u = real(t) / 2.0f;                  /* in TraceStep units (= 2 DeltaX) */
+            w->gx = 2 * (int)floorf(u + 0.5f);
+            w->pn = 0;
+            w->snap = 0;
+            memcpy(w->x0r, (const void *)ADDR_XMIN, 9);
+            thist0(w);
+        }
+        w->gx += 2 * dir;
     }
-    w->gx += 2 * dir;
-    if (w->gx > 264 || w->gx < 0)
+    if ((w->gx > 264 || w->gx < 0) && w->dr.dm != D_TANG)   /* Tangent(: TI never pans, X runs on past the edge */
         tpan(w, dir);
     tcalc(w);
+    if (snapon(w))
+        tpoi(w, dir);
 }
 
 /* UP / DOWN: the previous / next selected function, wrapping. X stays. */
 static void tswap(struct gw *w, int dir)
 {
     uint8_t i = w->fn, n = w->pm ? nu(w) : NEQ;
+    tunpoi(w);
+    thist0(w);
     if (!w->pm && pswap(w, dir)) {
         tlabel(w);
         cdecor(w);
@@ -2101,7 +2704,7 @@ static void tswap(struct gw *w, int dir)
     }
     do
         i = (uint8_t)((i + n + dir) % n);
-    while (!(w->pm ? have(w, i) : w->len[i]));
+    while (!have(w, i));
     w->fn = i;
     tlabel(w);
     cdecor(w);
@@ -2131,10 +2734,12 @@ static void tzoom(struct gw *w)
     uint8_t h[9], lo[9], hi[9], two[9];
     if (!w->yok)
         return;                                  /* ponytail: TI on an undefined point untested */
+    tunpoi(w);
+    thist0(w);
     symce_rom(0x6EDDA);                          /* the window to ZPrevious, and ZPrevious is valid */
     itor(2, two);
     for (int k = 0; k < 2; k++) {
-        const uint8_t *mn = (const uint8_t *)(k ? ADDR_YMIN : ADDR_XMIN), *c = k ? w->yv : w->pm && w->pm < 3 ? w->pxv : w->xv;
+        const uint8_t *mn = (const uint8_t *)(k ? ADDR_YMIN : ADDR_XMIN), *c = k ? w->yv : w->pm && (w->pm < 3 || webt(w)) ? w->pxv : w->xv;
         symce_fp(FP_SUB, mn + 9, mn, h);
         symce_fp(FP_DIV, h, two, h);
         symce_fp(FP_SUB, c, h, lo);
@@ -2154,8 +2759,9 @@ static void tzoom(struct gw *w)
     memcpy(w->x0r, (const void *)ADDR_XMIN, 9);
     tlabel(w);
     if (w->pm) {                                 /* Par, Pol: TI starts the trace over at Tmin */
-        w->tk = 0;
+        w->tk = w->zx = w->zr[2] = 0;
         w->snap = 0;
+        w->sn = -1;
         tset(w, 0);
     }
     w->pi = 0;                                   /* a plot: TI restarts at point 1 */
@@ -2173,7 +2779,7 @@ enum { Z_BOX = 1, Z_IN, Z_OUT, Z_DEC, Z_SQR, Z_STD, Z_TRIG, Z_INT, Z_STAT, Z_FIT
 
 static uint16_t vpix(int x, int y)
 {
-    return (unsigned)x < PW && (unsigned)y < PH ? VRAM[y * VS + x] : 0xFFFF;
+    return (unsigned)x < PW && (unsigned)y < SH ? VRAM[y * VS + x] : 0xFFFF;
 }
 
 /* ZBox: the outline between the first corner and the cursor (1 px), and the 7x7 marker on the
@@ -2308,6 +2914,55 @@ static void zfit(struct gw *w)
     deltas();
 }
 
+/* ZoomFit in Par and Pol: Xmin Xmax and Ymin Ymax from the points of every selected curve at T = min + k step
+   (measured on TI: Xscl, Yscl and the T window stay; Pol's X, Y are R cos(theta), R sin(theta) in the OS's arithmetic). */
+static void zfitp(struct gw *w)
+{
+    uint8_t x[9], y[9], lo[2][9], hi[2][9];
+    uint8_t pol = w->pm == 2;
+    uint32_t a = pol ? 0x0D01E69 : 0x0D01E84;
+    int got = 0, n;
+    if (!(real_os(a + 18) > 0) || real_os(a + 9) < real_os(a))
+        return;
+    n = tn(a);
+    for (uint8_t i = 0; i < nu(w); i++) {
+        uint8_t sx = pol ? i : (uint8_t)(2 * i);
+        if (!have(w, i))
+            continue;
+        for (int k = 0; k <= n; k++) {
+            tstepr(w->tv, a, k);
+            if (pol) {
+                uint8_t r[9];
+                symce_stov(0x5B, w->tv);
+                if (symce_osy(osn(w, sx), w->tv, r, 0x5B))
+                    continue;
+                symce_stov(0x52, r);
+                if (symce_eval(pcs[0], 5, x) || symce_eval(pcs[1], 5, y))
+                    continue;
+            } else if (symce_osy(osn(w, sx), w->tv, x, 0x54) || symce_osy(osn(w, (uint8_t)(sx + 1)), w->tv, y, 0x54))
+                continue;
+            for (uint8_t j = 0; j < 2; j++) {
+                const uint8_t *v = j ? y : x;
+                if (!got || real(v) < real(lo[j]))
+                    memcpy(lo[j], v, 9);
+                if (!got || real(v) > real(hi[j]))
+                    memcpy(hi[j], v, 9);
+            }
+            got = 1;
+        }
+    }
+    if (!got)
+        return;
+    symce_rom(0x6EDDA);
+    for (uint8_t j = 0; j < 2; j++) {
+        rnd10(lo[j]);
+        rnd10(hi[j]);
+        wvar(3 * j, lo[j]);
+        wvar(3 * j + 1, hi[j]);
+    }
+    deltas();
+}
+
 /* A window of whole numbers: Xmin Xmax Xscl Ymin Ymax Yscl. */
 static void zints(const int8_t *v)
 {
@@ -2363,7 +3018,11 @@ static void zpick(struct gw *w, uint8_t a)
         }
         break;
     case Z_STAT: symce_rom(0x20B28); deltas(); break;    /* the OS's ZoomStat (graph_fall has seen to its errors) */
-    case Z_FIT: zfit(w); break;
+    case Z_FIT:
+        w->pm = pmode();                         /* (the first render has not set it yet) */
+        if (w->pm) zfitp(w);
+        else zfit(w);
+        break;
     case Z_Q1: symce_rom(0xBD0F0); break;               /* the OS's ZQuadrant1 */
     case Z_PREV: symce_rom(0x20C10); deltas(); break;
     case Z_STO: symce_rom(0x20C18); break;
@@ -2443,7 +3102,7 @@ static void cmark(struct gw *w, int g, int right)
     static const uint8_t wd[9] = { 1, 2, 3, 5, 5, 5, 3, 2, 1 };
     int c = gpx(g);
     uint16_t k = pal(w->col[w->cf]);
-    for (int y = SMAX; y < PH; y += 2)
+    for (int y = SMAX; y < SH; y += 2)
         put(c, y, k);
     for (int j = 0; j < 9; j++)
         for (int i = 0; i < wd[j]; i++)
@@ -2497,7 +3156,7 @@ static void replot(struct gw *w)
 static void cleave(struct gw *w)
 {
     uint8_t x[9], y[9], had = w->cm, yo = w->yok || w->mode == M_FREE, cr = w->cres;
-    memcpy(x, w->xv, 9);
+    memcpy(x, webt(w) ? w->pxv : w->xv, 9);
     memcpy(y, w->yv, 9);
     plain(w);
     replot(w);
@@ -2698,7 +3357,7 @@ static void center(struct gw *w)
             w->cmc[1] = w->gy;
             do
                 i = (uint8_t)((i + 1) % NEQ);
-            while (!w->len[i]);
+            while (!lenok(w, i));
             chide(w);
             w->cs = 1;
             w->fn = i;
@@ -2756,8 +3415,8 @@ static void cpick(struct gw *w, uint8_t item)
         item = item < 3 ? (item == 1 ? C_VAL : C_DYDX) : w->pm == 2 ? C_DRT : item == 3 ? C_DYT : C_DXT;
     }
     i = i ? (uint8_t)(i - 1) : 0;
-    if (i >= n || !(w->pm ? have(w, i) : w->len[i]))
-        for (i = 0; i < n && !(w->pm ? have(w, i) : w->len[i]); i++)
+    if (i >= n || !have(w, i))
+        for (i = 0; i < n && !have(w, i); i++)
             ;
     if (i == n)
         return;
@@ -2844,21 +3503,29 @@ static void eenter(struct gw *w)
     uint8_t r[9];
     unsigned e = symce_eval(w->ent, w->nent, r);
     float x;
+    tunpoi(w);
+    thist0(w);
     if (e)
         cthrow(w, e == 1 ? 0x8F : e);       /* ERROR: <what the parser said> */
     x = real(r);
     if (w->pm) {                                 /* Par, Pol: T within Tmin..Tmax (theta within its window) */
-        if (!(w->pm == 3 ? x > sstart() - 1e-5f && x < ival(ADDR_NMAX) + 1e-5f : x >= real_os(tbase(w)) && x <= real_os(tbase(w) + 9)))
+        if (!(w->pm == 3 ? x > sstart() - 1e-5f && (webt(w) || x < ival(ADDR_NMAX) + 1e-5f) : x >= real_os(tbase(w)) && x <= real_os(tbase(w) + 9)))
             cthrow(w, 0x8F);
-        if (w->pm == 3 && fabsf(x - floorf(x + 0.5f)) > 1e-5f)
+        if (w->pm == 3 && fabsf(x - floorf(x + 0.5f)) > 1e-5f * (1 + x))   /* (real() is a float: 8 comes out 8.00001) */
             cthrow(w, 0x84);                     /* ERROR: DOMAIN (TI: INVALID first, outside sstart..nMax) */
         memcpy(w->xv, r, 9);
         w->mode = M_TRACE;
         w->snap = 1;
+        replot(w);
+        labsave(w);                              /* (the plot was redrawn under the box: the label strip again) */
+        tlabel(w);
+        if (webt(w)) {                           /* Web: n = nMin is step 0, else the step on the curve; the cobweb is drawn up to it */
+            int n = rnd(x), m = ival(ADDR_NMIN);
+            w->tk = n > m ? 2 * (n - m) - 1 : 0;
+            w->sn = -1;                          /* (the OS parser on the typed n leaves the solver's terms stale) */
+        }
         tshow(w);
-        if (w->cm == C_VAL) {                    /* CALC value: the label, the point, and the result is up */
-            labsave(w);
-            tlabel(w);
+        if (w->cm == C_VAL) {                    /* CALC value: the point, and the result is up */
             tshow(w);
             w->cs = 3;
             w->cres = 1;
@@ -2874,9 +3541,10 @@ static void eenter(struct gw *w)
     w->pn = 0;
     w->snap = 1;
     memcpy(w->x0r, (const void *)ADDR_XMIN, 9);
-    if (w->cm == C_VAL) {                        /* CALC value: the label, the point, and the result is up */
-        labsave(w);
-        tlabel(w);
+    replot(w);
+    labsave(w);                                  /* (the plot was redrawn under the box: the label strip again) */
+    tlabel(w);
+    if (w->cm == C_VAL) {                        /* CALC value: the point, and the result is up */
         tshow(w);
         w->cs = 3;
         w->cres = 1;
@@ -2885,6 +3553,8 @@ static void eenter(struct gw *w)
     tshow(w);
     if (w->cm)                                   /* a typed bound, limit, curve or guess */
         center(w);
+    else if (w->dr.dm == D_TANG)                 /* Tangent(: ENTER in the box draws at once */
+        dtent(w);
 }
 
 /* An arrow (GetCSC 1 down, 2 left, 3 right, 4 up) n times for the free cursor, once for TRACE. */
@@ -2896,12 +3566,17 @@ static void arrow(struct gw *w, uint8_t key, int rep)
     }
     if (w->cres) {                               /* after a CALC result: a free cursor where the result is */
         int gx = w->gx, gy = w->gy;
+        uint8_t tg = w->dr.dm == D_TANG;
         chide(w);
         plain(w);
         replot(w);
         w->mode = M_FREE;
         w->gx = gx;
         w->gy = gy;
+        if (tg) {
+            dr_home(w);                          /* after Tangent( the free cursor is where it was left (measured) */
+            w->dr.dm = D_TANG;                   /* ... and goes on remembering it (dr_prev) */
+        }
         w->cm = w->cs = w->cres = 0;             /* the CALC is over: a plain free cursor from now on */
     }
     if (w->mode == M_FREE || w->mode == M_PLAIN) {
@@ -2911,6 +3586,10 @@ static void arrow(struct gw *w, uint8_t key, int rep)
             w->mode = M_FREE;
             w->gx = 132;
             w->gy = 82;
+            if (mget(40) == 1) {                 /* after a Tangent( session: from the spot it kept, and keeps it */
+                dr_home(w);
+                w->dr.dm = D_TANG;
+            }
         }
         if (key == 1) w->gy -= n;
         if (key == 2) w->gx -= n;
@@ -2918,6 +3597,10 @@ static void arrow(struct gw *w, uint8_t key, int rep)
         if (key == 4) w->gy += n;
         w->gx = w->gx < 0 ? 0 : w->gx > 264 ? 264 : w->gx;
         w->gy = w->gy < 0 ? 0 : w->gy > 164 ? 164 : w->gy;
+        if (w->dr.dm == D_TEXT) {                /* Text(: the cell stays on the grid */
+            w->gx = w->gx > 263 ? 263 : w->gx;
+            w->gy = w->gy < 16 ? 16 : w->gy;
+        }
         fshow(w);
     } else if (key == 2 || key == 3) {
         tmove(w, key == 3 ? 1 : -1);
@@ -2927,9 +3610,14 @@ static void arrow(struct gw *w, uint8_t key, int rep)
 }
 
 /* Between keys: the blink, and a held arrow's repeats. */
+static void tb_ttick(struct gw *w);
 static void tick(struct gw *w)
 {
     unsigned t;
+    if (w->tbl.on) {
+        tb_ttick(w);
+        return;
+    }
     if (w->mode != M_FREE && w->mode != M_TRACE) {
         w->hk = 0;
         return;
@@ -2960,7 +3648,9 @@ static const uint8_t hand1[] = { 0x35, 0x49, 0x34, 0x48, 0x33, 0x2E, 0x32, 0x5A,
                                  0x2F, 0x32, 0x1F, 0x2D, 0x17, 0x35, 0x20, 0x31, 0x27, 0x2C, 0 };
 static const uint8_t hand2[] = { 0x32, 0x3B, 0x33, 0x57, 0x31, 0x4A, 0x34, 0x4B, 0x35, 0x30,
                                  0x1F, 0x2F, 0x0A, 0x36, 0x20, 0x3A, 0x2F, 0x33, 0x27, 0x39,
-                                 0x17, 0x38, 0x2E, 0x37, 0 };
+                                 0x17, 0x38, 0x2E, 0x37, 0x21, 0x3E, 0 };
+
+#include "graph_table.c"
 
 /* Key 0 draws, 0xFF is "no key yet" (the blink and a held arrow's repeats), 0xFE starts
    TRACE. A GetCSC code afterwards: CLEAR and 2nd QUIT (2nd MODE) return 1 to go home
@@ -2981,8 +3671,18 @@ uint8_t graph_key(struct gw *w, uint8_t key)
         render(w);
         return 0;
     }
+    if (w->tbl.on)
+        return tb_tkey(w, key);
     if (key == 0xFE) {
         tstart(w);
+        return 0;
+    }
+    if (key == 0xE0) {                           /* 2nd GRAPH from home */
+        tb_topen(w);
+        return 0;
+    }
+    if (key == 0xFC) {                           /* back from an OS menu opened in Text(: its token, at the cursor */
+        dr_tpaste(w);
         return 0;
     }
     if (key >= 0xF1 && key <= 0xFD) {            /* a 2nd DRAW pick */
@@ -3001,21 +3701,37 @@ uint8_t graph_key(struct gw *w, uint8_t key)
         w->sec = 1;
         return 0;
     }
-    if (key == 0x30)                             /* alpha */
+    if (key == 0x30) {                           /* alpha */
+        if (m == M_FREE && w->dr.dm == D_TEXT) {
+            w->dr.ds = sec ? 2 : 1;              /* ALPHA once, 2nd ALPHA locked */
+            w->sec = 0;
+        }
         return 0;
+    }
     w->sec = 0;
     if (sec && key == 0x37)
         return 1;
+    if (m == M_FREE && w->dr.dm == D_TEXT && dr_text(w, key, sec))
+        return 0;
     if (!sec && key >= 1 && key <= 4) {
+        if (w->hk == key && m != M_ENTRY && ((now() - w->tr) & 0xFFFFFF) < 5000) {   /* GetCSC repeating a held key (a tap of the same arrow comes 150 ms or more after the last): tick() does TI's repeats (0.5 s, then 5 px a 100 ms) */
+            if (((now() - w->th) & 0xFFFFFF) < HOLD)
+                w->tr = now();                   /* (after HOLD tr is tick()'s: its repeats need it) */
+            return 0;
+        }
         w->hk = key;
         w->th = w->tr = now();
         if (m != M_ENTRY)
             arrow(w, key, 0);
         return 0;
     }
+    if (!sec && key == 0x32 && m == M_FREE && w->dr.dm == D_TEXT) {   /* TRACE in Text(: TI's plain graph, the text kept */
+        cleave(w);
+        return 0;
+    }
     if (!sec && key == 0x32) {                   /* TRACE */
-        if (sp_state() && !sp_trok())
-            return 0x5A;                         /* stat plots on: TI's TRACE walks them (graph_fall hands the OS the graph) */
+        if ((sp_state() && !sp_trok()) || (w->pm == 3 && ((OSB(ADDR_SEQF) & 0x1C) || (webt(w) && !webone(w)))))
+            return 0x5A;                         /* stat plots on, Seq uv/vw/uw: TI's TRACE walks them (graph_fall hands the OS the graph) */
         if (w->cm)
             return 0;                            /* ponytail: TRACE inside CALC untested */
         if (m == M_ENTRY) {                      /* back to the start of the trace */
@@ -3028,6 +3744,7 @@ uint8_t graph_key(struct gw *w, uint8_t key)
                 tset(w, 0);
             }
             memcpy(w->x0r, (const void *)ADDR_XMIN, 9);
+            replot(w);
             tcalc(w);
         } else if (m != M_TRACE)
             tstart(w);
@@ -3062,7 +3779,7 @@ uint8_t graph_key(struct gw *w, uint8_t key)
             return 0;
         }
     }
-    if (m == M_FREE && w->dr.dm && !sec && key == 0x09) {
+    if (m == M_FREE && w->dr.dm && w->dr.dm != D_TEXT && w->dr.dm != D_TANG && !sec && key == 0x09) {
         dr_enter(w);
         return 0;
     }
@@ -3077,7 +3794,12 @@ uint8_t graph_key(struct gw *w, uint8_t key)
                 return d < 10 ? 0x8E + d : 0;   /* k0 = 0x8E, k1..k9 = 0x8F..0x97 */
         }
         if (!sec && key == 0x09) {
-            if (!w->cm)
+            if (w->dr.dm == D_TANG) {
+                if (w->cres)
+                    cleave(w);
+                else
+                    dtent(w);
+            } else if (!w->cm)
                 tzoom(w);
             else if (w->cres)
                 cleave(w);
@@ -3098,6 +3820,21 @@ uint8_t graph_key(struct gw *w, uint8_t key)
     if (!sec && (key == 0x0F || (m != M_PLAIN && key == 0x09))) {
         if (m == M_PLAIN)
             return 1;
+        if (key == 0x0F && m == M_TRACE && webt(w) && !w->cm) {   /* Web CLEAR: the cursor, label and bar go, the cobweb stays */
+            uint8_t x[9], y[9];
+            int n;
+            chide(w);
+            plain(w);
+            replot(w);                           /* the bar sat on the plot's foot: the plot again, and the cobweb redrawn up to the step */
+            if (w->tk) {
+                w->zx = w->zr[2] = 0;
+                webseg(w, &n, x, y);
+            }
+            symce_stox(w->pxv);
+            if (w->yok)
+                symce_stoy(w->yv);
+            return 0;
+        }
         cleave(w);                               /* the cursor is forgotten */
         return 0;
     }
@@ -3105,9 +3842,20 @@ uint8_t graph_key(struct gw *w, uint8_t key)
         cleave(w);
         return 0;
     }
+    if (sec && key == 0x31) {                    /* 2nd GRAPH: SymCE's table, or TI's for what it does not do */
+        if (tb_fall())
+            return 0x4A;
+        tb_topen(w);
+        return 0;
+    }
     for (t = sec ? hand2 : hand1; *t; t += 2)
-        if (*t == key)
+        if (*t == key) {
+            if (m == M_FREE && w->dr.dm == D_TEXT && (t[1] == 0x32 || t[1] == 0x33 || t[1] == 0x35 || t[1] == 0x37 || t[1] == 0x39 || t[1] == 0x3A))
+                *(volatile uint16_t *)0x0D0FB12 = 0x5AA5;   /* MATH, TEST, MATRIX, ANGLE, LIST (not DISTR: its items open a wizard and never reach the menu hook): an item is written at the cursor (main.asm, menuKey) */
+            if (m == M_FREE && w->dr.dm == D_TEXT && t[1] == 0x3E)
+                *(volatile uint16_t *)0x0D0FB16 = 0x5AA5;   /* CATALOG: its pick is the raw key hook's (main.asm, .cat) */
             return t[1];
+        }
     return 0;
 }
 
@@ -3316,6 +4064,82 @@ __asm__(
 "	jr	nz, .Lfc\n"
 "	pop	ix\n"
 "	ret\n"
+/* fill(p, n, c): n 16-bit pixels at p set to c, by LDIR over the first pixel (n >= 1). */
+"	.section	.text._symce_fill,\"ax\",@progbits\n"
+"	.globl	_symce_fill\n"
+"_symce_fill:\n"
+"	push	ix\n"
+"	ld	ix, 0\n"
+"	add	ix, sp\n"                /* ix+6 p, +9 n, +12 c */
+"	ld	hl, (ix + 6)\n"
+"	ld	bc, (ix + 12)\n"
+"	ld	(hl), c\n"
+"	inc	hl\n"
+"	ld	(hl), b\n"
+"	dec	hl\n"
+"	ld	bc, (ix + 9)\n"
+"	dec	bc\n"
+"	ld	a, b\n"
+"	or	a, c\n"
+"	jr	z, .Lfd\n"
+"	sla	c\n"
+"	rl	b\n"
+"	push	hl\n"
+"	pop	de\n"
+"	inc	de\n"
+"	inc	de\n"
+"	ldir\n"
+".Lfd:\n"
+"	pop	ix\n"
+"	ret\n"
+/* fmtn(real, out, width): symce_fmt with a width, the OS's 0x9968B number field (the table's bottom line). */
+"	.section	.text._symce_fmtn,\"ax\",@progbits\n"
+"	.globl	_symce_fmtn\n"
+"_symce_fmtn:\n"
+"	push	ix\n"
+"	ld	ix, 0\n"
+"	add	ix, sp\n"
+"	ld	iy, 0x0D00080\n"
+"	ld	hl, (ix + 6)\n"
+"	call	0x0020320\n"
+"	set	6, (iy + 29)\n"
+"	ld	a, (ix + 12)\n"
+"	call	0x009968B\n"
+"	ld	de, (ix + 9)\n"
+".Lfn:\n"
+"	ld	a, (hl)\n"
+"	ld	(de), a\n"
+"	inc	hl\n"
+"	inc	de\n"
+"	or	a, a\n"
+"	jr	nz, .Lfn\n"
+"	pop	ix\n"
+"	ret\n"
+/* fmtw(real, out, width): the number TI's table prints in a cell of that many characters (OS 0x98F2B, as
+   the table's 0xB62B8 calls it for a real), and in the bottom line for the selected cell. The text is
+   at OP3's 0xD0060E and is copied to out. */
+"	.section	.text._symce_fmtw,\"ax\",@progbits\n"
+"	.globl	_symce_fmtw\n"
+"_symce_fmtw:\n"
+"	push	ix\n"
+"	ld	ix, 0\n"
+"	add	ix, sp\n"                /* ix+6 real, +9 out, +12 width */
+"	ld	iy, 0x0D00080\n"
+"	ld	hl, (ix + 6)\n"
+"	call	0x0020320\n"
+"	ld	a, (ix + 12)\n"
+"	call	0x0098F2B\n"
+"	ld	hl, 0x0D0060E\n"
+"	ld	de, (ix + 9)\n"
+".Lfw:\n"
+"	ld	a, (hl)\n"
+"	ld	(de), a\n"
+"	inc	hl\n"
+"	inc	de\n"
+"	or	a, a\n"
+"	jr	nz, .Lfw\n"
+"	pop	ix\n"
+"	ret\n"
 /* text(x, y, fg, bg, s, big): s at the pen (x, y) with VPutMap in the small font, or the
    large one if big. */
 "	.section	.text._symce_text_,\"ax\",@progbits\n"
@@ -3366,6 +4190,22 @@ __asm__(
 "	pop	af\n"
 "	ld	iy, 0x0D00080\n"
 "	ld	(iy + 0x32), a\n"
+"	pop	ix\n"
+"	ret\n"
+/* sglyph(c): the OS's small-font record of display char c (Load_Sfont: A = c, HL = c*25), byte 0 = advance. */
+"	.section	.text._symce_sglyph,\"ax\",@progbits\n"
+"	.globl	_symce_sglyph\n"
+"_symce_sglyph:\n"
+"	push	ix\n"
+"	ld	ix, 0\n"
+"	add	ix, sp\n"                /* ix+6 c */
+"	ld	iy, 0x0D00080\n"
+"	ld	a, (ix + 6)\n"
+"	ld	hl, 0\n"
+"	ld	h, 25\n"
+"	ld	l, a\n"
+"	mlt	hl\n"
+"	call	0x00A55D3\n"
 "	pop	ix\n"
 "	ret\n"
 /* tok(t, out): the text of the token at t (GetTokString) into out. */
@@ -3830,9 +4670,13 @@ void symce_stoy(const uint8_t *r) { (void)r; }
 void symce_stox(const uint8_t *r) { (void)r; }
 void symce_fp(unsigned fn, const uint8_t *a, const uint8_t *b, uint8_t *out) { (void)fn; (void)a; (void)b; (void)out; }
 void symce_fmt(const uint8_t *r, char *out) { (void)r; *out = 0; }
+void symce_fmtw(const uint8_t *r, char *out, unsigned width) { (void)r; (void)width; *out = 0; }
+void symce_fmtn(const uint8_t *r, char *out, unsigned width) { (void)r; (void)width; *out = 0; }
+void symce_fill(uint16_t *p, unsigned n, unsigned c) { while (n--) *p++ = c; }
 void symce_text(int x, int y, unsigned fg, unsigned bg, const char *s, unsigned big) { (void)x; (void)y; (void)fg; (void)bg; (void)s; (void)big; }
 unsigned symce_eval(const uint8_t *tok, unsigned n, uint8_t *out) { (void)tok; (void)n; (void)out; return 1; }
 void symce_tok_(const uint8_t *t, char *out) { (void)t; *out = 0; }
+const uint8_t *symce_sglyph(unsigned c) { (void)c; return 0; }
 void symce_dirty(void) {}
 unsigned symce_calc(unsigned kind, unsigned fn1, const uint8_t *l, const uint8_t *r, const uint8_t *g, unsigned fn2, uint8_t *out) { (void)kind; (void)fn1; (void)l; (void)r; (void)g; (void)fn2; (void)out; return 1; }
 void symce_stoans(const uint8_t *r) { (void)r; }

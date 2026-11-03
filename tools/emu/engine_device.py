@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """The shipped engine, run on the real ROM, against its host build.
 
-    python3 engine_device.py [N] [SEED]
+    python3 engine_device.py [N] [SEED] [only=A-B] [ph=MS]
+
+only=A-B runs just those vectors (global indices) as one program; ph=MS waits that
+many ms before launching it. The calculator's interrupts land at a different place in
+the engine for each phase, so the regression for the symce_umul interrupt race is
+`only=764-927 ph=0` (also ph=1,2,3): it hung the program in vector 925 until umul
+stopped keeping its carry byte below SP.
 
 engine_check.py proves engine.c on the host. The calculator runs a different
 compile of it -- ez80-clang, 24-bit int, libcrt's 32-bit helpers -- so this
@@ -17,7 +23,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import screen
-from engine_check import structured, tree, render, ti_real, ALPHABET, MAXLEN
+from engine_check import structured, tree, render, ti_real, ALPHABET, MAXLEN, cn, CMDNAMES
+import re
 from fractions import Fraction
 from ez80sim import engine, Err
 
@@ -26,8 +33,8 @@ TOK = {'+': [0x70], '-': [0x71], '*': [0x82], '/': [0x83], '^': [0xF0],
        'θ': [0x5B], '.': [0x3A], '⁄': [0xEF, 0x2E], '@': [0x72],
        '⁻': [0x0C], '¹': [],                # x⁻¹ is one token
        '√': [0xBC],                         # √( is one token: √8) is √(8)
-       '=': [0x6A], ',': [0x2B], 'e': [0xBB, 0x31], 'ᴇ': [0x3B]}
-NAMES = {'logBASE(': [0xEF, 0x34], 'sin(': [0xC2], 'cos(': [0xC4], 'tan(': [0xC6],
+       '=': [0x6A], '<': [0x6B], '>': [0x6C], '≤': [0x6D], '≥': [0x6E], '≠': [0x6F], ',': [0x2B], "'": [0xAE], 'e': [0xBB, 0x31], 'ᴇ': [0x3B]}
+NAMES = {' and ': [0x40], 'logBASE(': [0xEF, 0x34], 'sin(': [0xC2], 'cos(': [0xC4], 'tan(': [0xC6],
          'ln(': [0xBE], 'log(': [0xC0], 'e^(': [0xBF]}     # lower case: no clash with A-Z
 
 # Where a 24-bit int or a wrong 32-bit helper would bite: coefficients at the
@@ -47,6 +54,12 @@ EDGE = ["999999X+1", "999999X^7-999999X^6", "(999X+1)(999X-1)", "(707X+707)^2",
         "(X²-1)/(X-1)", "(X^7-1)/(X-1)", "(X+1)^7/(X+1)^6", "X^7/X^7", "1/X",
         "X/(X+1)", "(2X+3)^5/(2X+3)^4", "(X³-Y³)/(X-Y)", "(999999X²+X)/X",
         "(X+1)(X+2)(X+3)/(X²+3X+2)", "X/0X",
+        # steps( : the answer as without it, and the step log written past the pool (the stack peak is measured with it)
+        "STEPS(SOLVE(2X+3=7,X))", "STEPS(SOLVE(X/3-1/2=1,X))", "STEPS(DERIV(X^2*sin(X),X))", "STEPS(DERIV((X+1)/(X-1),X))",
+        "STEPS(DERIV(X^6-3X^5+X^4-9X^3+2X^2-7X+4,X))", "STEPS(FACTOR(12))", "STEPS(2+3)", "STEPS(SOLVE(2X+Y=7,X))",
+        "STEPS(SOLVE(X^2-5X+6=0,X))", "STEPS(SOLVE(X^2-2X-1=0,X))", "STEPS(SOLVE(X^3-6X^2+11X-6=0,X))", "STEPS(SOLVE(2X^2=8X,X))",
+        "STEPS(INTEGRAL(X^2,X,0,2))", "STEPS(INTEGRAL(sin(X)+X,X,0,2))", "STEPS(INTEGRAL(cos(X),X,0,2))", "STEPS(LIMIT(X^2+1,X,3))", "STEPS(LIMIT((3X^2+1)/(X^2+2),X,1E99))", "STEPS(DERIV(INTEGRAL(X,X),X))", "STEPS(DERIV(sin(2X),X))", "STEPS(DERIV(X*ln(X),X))",
+        "STEPS(FACTOR(2X^3-8X))", "STEPS(FACTOR(X^3-6X^2+11X-6))", "STEPS(FACTOR(X^2Y-Y))", "STEPS(FACTOR(720720))",
         "(X²-Y²+X-Y)/(X²-Y²)", "(X²-Y²)/(Xθ+Yθ+X+Y)", "(X³-Y³+X²-Y²)/(X²-2XY+Y²)",
         # fractions: Euclid, content and the 24-bit int on the way
         "1/X+1/X", "(X²+5X+6)/(X²-4)", "1/X+1/Y", "X^~7", "X^~8", "(X+Y)/(X-Y)",
@@ -76,6 +89,14 @@ EDGE = ["999999X+1", "999999X^7-999999X^6", "(999X+1)(999X-1)", "(707X+707)^2",
         "SOLVE(6X²-X-2=0,X)", "SOLVE(X²+1=0,X)", "SOLVE(X=X,X)", "SOLVE(X+2Y=3,X)",
         "SOLVE(X+2Y=3,Y)", "SOLVE(AX+B=0,X)", "SOLVE(X³=2,X)", "SOLVE(X√2)=1,X)",
         "SOLVE(X²+2X=1,X)", "SOLVE(999999X²=2,X)", "SOLVE(X+2=4,X)", "SOLVE(Y+4=8,Y)",
+        "SOLVE(EXPAND((X+1)^2)=0,X)", "FACTOR(DERIV(X³-3X,X))", "2EXPAND((X+1)^2)", "DERIV(EXPAND((X+1)^3),X)",
+        "FACTOR(DERIV(EXPAND(FACTOR(EXPAND((X+1)^3))),X))", "FACTOR(SOLVE(X-1=0,X))", "CFACTOR(EXPAND(X²+1))+1",
+        "EXPAND((X+1)^2)+EXPAND((X+2)^2)+EXPAND((X+3)^2)", "3+SUM(X,X,1,3)", "SOLVE(SOLVE(X-1=0,X)=0,X)",
+        "SOLVE(X²-4>0,X)", "SOLVE(X²-2X-3≤0,X)", "SOLVE((X+1)/(X-2)≥0,X)", "SOLVE(X²>2,X)",
+        "SOLVE((X-1)²≠0,X)", "SOLVE(X³-X<0,X)", "SOLVE(X²+1>0,X)", "CSOLVE(X>1,X)",
+        "SOLVE(abs(X-1)<3,X)", "SOLVE(abs(2X+1)≥5,X)", "SOLVE(abs(X-1)≠3,X)", "SOLVE(abs(X-1)<X,X)",
+        "PARTFRAC(1/(X²-1),X)", "PARTFRAC((X+3)/(X³-X),X)", "PARTFRAC(X/((X-1)(X²+1)),X)",
+        "PARTFRAC(X³/(X²-1))", "PARTFRAC(1/(X²(X+1)),X)",
         "SOLVE(X²-4)", "SOLVE(X²=4)", "SOLVE(X²-4,X)", "SOLVE(X=4,2)", "SOLVE(X=4,",
         "DERIV(X³)", "DERIV(1/X)", "DERIV(√X))", "DERIV(X²Y,Y)", "DERIV(1/(X+1))",
         "DERIV(5)", "DERIV(X^7-X)", "EXPAND((X+1)²)", "EXPAND((X+Y)^3)",
@@ -128,14 +149,32 @@ EDGE = ["999999X+1", "999999X^7-999999X^6", "(999X+1)(999X-1)", "(707X+707)^2",
         # sign checks, INTEGRAL's u = aX+b, a root under a root refused
         "√(X²)", "√(8X²)", "√(999999X+999999)", "√(X²+2X+1)", "1/(√(X+1)+1)", "abs(~X)",
         "√(X+1)^3", "√(√(2)-X)", "DERIV(√(X+1),X)", "DERIV(abs(X),X)", "TAYLOR(√(X+1),X,2)",
+        "LIMIT((√(X+4)-2)/X,X,0)", "LIMIT(X*sin(1/X),X,0)", "LIMIT(abs(X)/X,X,0,1)", "LIMIT(X²*e^(~X),X,1ᴇ99)", "LIMIT(ln(X)/X,X,1ᴇ99)",
+        "LIMIT(X^X,X,0,1)", "LIMIT((1+1/X)^X,X,1ᴇ99)", "LIMIT(√(X²+X)-X,X,1ᴇ99)", "LIMIT(sin(X),X,1ᴇ99)",
+        "SUM(3^X,X,1,5)", "SUM((~1)^X/X,X,1,6)", "SUM(1/X!,X,0,5)", "SUM(2^X,X,0,N)", "SUM(5(0.9)^X,X,0,1ᴇ99)",
+        "SUM(1/(X(X+1)),X,1,1ᴇ99)", "SUM(1/X²,X,1,1ᴇ99)", "SUM(1/X,X,1,1ᴇ99)", "SUM((~1)^X,X,0,1ᴇ99)",
         "LIMIT((√(X+1)-2)/(X-3),X,3)", "INTEGRAL(√(3-2X),X,0,1)", "INTEGRAL(1/√(X+1)+X,X)",
         "INTEGRAL(X√(X+1),X)", "SOLVE(√(X+1)=X,X)", "SOLVE(√(X)=~3,X)", "SOLVE(abs(X-1)=2X,X)",
         "SOLVE(abs(X²-4)=5,X)", "SOLVE(√(X²)=X,X)", "DISTANCE((X,0),(1,0))"]
+# DESOLVE is 20 KB of the engine: `engine_device.py ds` runs these on the whole engine, the
+# default run on one built with -DNODESOLVE (the program must fit 150 KB of RAM with its vectors).
+DESOLVES = ["DESOLVE(Y'=2Y and Y(0)=3,X,Y)", "DESOLVE(Y'=X/Y and Y(0)=2,X,Y)", "DESOLVE(Y'+Y=sin(X) and Y(0)=1,X,Y)", "DESOLVE(Y''+2Y'+5Y=0 and Y(0)=1 and Y'(0)=0,X,Y)", "DESOLVE(Y''+3Y'+2Y=X²+e^(X)+sin(X),X,Y)", "DESOLVE(Y''-Y=Xe^(X),X,Y)"]
 DEGREE = ["TOEXP(sin(X))", "TEXPAND(sin(3θ))", "TOLN(log(X))",    # MODE DEGREE, once each
           "DERIV(sin(X))", "DERIV(e^(X))", "CENTRALDIFF(cos(X),X,1)", "INTEGRAL(sin(X),X)"]
-PART = 40000                            # vector bytes per program: see main()
-CMDS = [b'EXPAND\x10', b'FACTOR\x10', b'SOLVE\x10', b'DERIV\x10', b'POLYROOTS\x10', b'CPOLYROOTS\x10',
-        b'CFACTOR\x10', b'POLYCOEFFS\x10', b'POLYDEGREE\x10', b'COMDENOM\x10', b'TCOLLECT\x10']
+SIDE = ['PARTFRAC', 'DISTANCE', 'SLOPE', 'PARALLEL', 'PERPENDICULAR', 'INTERSECT', 'REFLECT', 'MIDPOINT', 'LINE', 'PERPBISECTOR',
+        'PARTITION', 'AREA', 'PERIMETER', 'CENTROID', 'CIRCUMCENTER', 'ORTHOCENTER', 'INCENTER', 'HYPOT', 'LEG', 'CIRCLE', 'ROTATE',
+        'DILATE', 'MDET', 'MINV', 'MRREF', 'MTRANS', 'DOTP', 'CROSSP', 'NORM']     # `engine_device.py side` runs these
+LS = ['LIMIT', 'SUM', 'PRODUCT', 'DOMINANTTERM']     # `engine_device.py ls` runs these (the default build has -DNOLS)
+def inls(t):
+    """t is LIMIT, SUM, PRODUCT or DOMINANTTERM, or steps( of one"""
+    st = cn('STEPS') + b'\x10'
+    t = t[len(st):] if t.startswith(st) else t
+    return any(t.startswith(cn(c)) for c in LS)
+
+
+PART = 1200                           # vector bytes per program: see main()
+CMDS = [cn('EXPAND') + b'\x10', cn('FACTOR') + b'\x10', cn('SOLVE') + b'\x10', cn('DERIV') + b'\x10', cn('POLYROOTS') + b'\x10', cn('CPOLYROOTS') + b'\x10',
+        cn('CFACTOR') + b'\x10', cn('POLYCOEFFS') + b'\x10', cn('POLYDEGREE') + b'\x10', cn('COMDENOM') + b'\x10', cn('TCOLLECT') + b'\x10']
 
 # (entry, what Ans is), @ standing for the Ans token: the answer is substituted
 # in, so its width and its own limits meet the entry's. A Fraction is the OS's
@@ -167,6 +206,10 @@ def last(a):
 def tok(s):
     out = []
     while s:
+        m = re.match(r'([A-Z]+)\(', s)
+        if m and m.group(1) in CMDNAMES:       # a command: its lowercase tokens
+            out, s = out + list(cn(m.group(1))), s[len(m.group(1)):]
+            continue
         n = next((k for k in NAMES if s.startswith(k)), None)
         if n:
             out, s = out + NAMES[n], s[len(n):]
@@ -207,15 +250,34 @@ def cases(n, seed):
 
 
 def main():
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 960
-    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 20260926
+    ds = 'ds' in sys.argv
+    side = 'side' in sys.argv
+    ls = 'ls' in sys.argv
+    opt = dict(a.split('=') for a in sys.argv if '=' in a)
+    argv = [a for a in sys.argv if a not in ('ds', 'side', 'ls') and '=' not in a]
+    if not ds and not side and not ls:     # the host reference of the default build leaves the same menus out (see engine.c, NOSIDE)
+        ref = os.path.join(HERE, 'engtest', 'engine_cli_noside')
+        subprocess.run(['cc', '-O2', '-DNOSIDE', '-DNOLS', '-o', ref, os.path.join(ROOT, 'tools/engine_cli.c')], check=True, capture_output=True)
+        import ez80sim
+        ez80sim.ENGINE_CLI = ref
+    n = int(argv[1]) if len(argv) > 1 else 960
+    seed = int(argv[2]) if len(argv) > 2 else 20260926
     # The edge cases in every mode the hook passes: Classic, MathPrint (wider
     # answers fit), and each with MODE ANSWERS: DEC; the rest take turns.
     modes = (0, 0x20, 0x01, 0x21)
     edge = len(EDGE) + len(EDGE_ANS)
-    vecs = [(t, p, m, engine(t, p, m)) for i, (t, p) in enumerate(cases(n, seed))
-            for m in (modes if i < edge else (modes[i % 4],))]
-    vecs += [(tok(t), last(b''), 0x04, engine(tok(t), last(b''), 0x04)) for t in DEGREE]
+    if ds:
+        vecs = [(tok(t), last(b''), m, engine(tok(t), last(b''), m)) for t in DESOLVES for m in modes]
+    else:
+        vecs = [(t, p, m, engine(t, p, m)) for i, (t, p) in enumerate(cases(n, seed))
+                for m in (modes if i < edge else (modes[i % 4],))]
+        if ls:                  # LIMIT, SUM, PRODUCT, DOMINANTTERM: the build with INTEGRAL left out
+            vecs = [v for v in vecs if inls(v[0])]
+        elif side:              # the Geometry and Matrix menus and PARTFRAC: the build with the Calculus menu left out
+            vecs = [v for v in vecs if any(v[0].startswith(cn(c)) for c in SIDE) and not v[0].startswith(cn('NORMALLINE'))]     # NORM matches NORMALLINE, which needs DERIV
+        else:
+            vecs = [v for v in vecs if not inls(v[0])]
+            vecs += [(tok(t), last(b''), 0x04, engine(tok(t), last(b''), 0x04)) for t in DEGREE]
     # an error screen: FF, then the message's length and bytes
     enc = [p + bytes([m, len(t)]) + t
            + (bytes([0xFF, len(a)]) if isinstance(a, Err) else bytes([len(a)])) + a
@@ -238,7 +300,20 @@ def main():
           "%d error screens), %d bytes in %d parts" % (len(vecs), answered, with_ans, wide, thrown,
                                                        sum(map(len, enc)), len(parts)))
     env = dict(os.environ, PATH=os.path.expanduser('~/CEdev/bin') + os.pathsep + os.environ['PATH'])
+    es = '../../../symce/obj/engine/engine.s'      # relative to engtest/, as its makefile wants
+    if not ds:                                  # the same compile, DESOLVE left out, and one of the two menu groups
+        mk = subprocess.run(['make', '-C', os.path.join(ROOT, 'symce'), '-n', '-W', 'src/engine.c', 'obj/engine.inc'],
+                            capture_output=True, text=True).stdout
+        cl = next(l for l in mk.split('\n') if 'ez80-clang' in l and 'engine.s' in l)
+        es = 'engine_side.s' if side else 'engine_ls.s' if ls else 'engine_nods.s'
+        subprocess.run(cl.replace('obj/engine/engine.s', os.path.join(HERE, 'engtest', es))
+                       .replace('-Oz', '-Oz -DNODESOLVE -DNOSTEPSX ' + ('-DNOCALC' if side else '-DNOSIDE -DNOINT' if ls else '-DNOSIDE -DNOLS'), 1)
+                       .replace('src/engine.c', os.path.join(ROOT, 'symce/src/engine.c')), shell=True, check=True, cwd=os.path.join(ROOT, 'symce'))
+    env['ENGINE_S'] = es
     deep = 0
+    if 'only' in opt:
+        a, b = map(int, opt['only'].split('-'))
+        parts = [list(range(a, b + 1))]
     for part in parts:
         blob = b''.join(enc[i] for i in part) + b'\xfe'
         with open(os.path.join(HERE, 'engtest/src/vectors.h'), 'w') as f:
@@ -253,7 +328,7 @@ def main():
             sys.exit(b.stdout[-2000:] + b.stderr[-2000:])
         # Each '.' is 2s of emulated time; the report says how far it got if short.
         r = screen.read([("report", 0xD0EE40, 46)],
-                        keys="apps down enter . clear . L" + " ." * 150,
+                        keys="apps down enter . clear . " + ("w%s " % opt['ph'] if 'ph' in opt else "") + "L" + " ." * 150,
                         files=tuple(sorted(glob.glob(os.path.join(HERE, "engtest/bin/ENGTEST.8xp*")))),
                         launch="ENGTEST", lead=False)["report"]
         magic, ran = r[:4], int.from_bytes(r[4:7], 'little')

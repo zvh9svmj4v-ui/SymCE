@@ -1,0 +1,8 @@
+title: SymCE
+description: "CAS for the TI-84 Plus CE: exact algebra, calculus, equation solving and step-by-step solutions on the home screen, plus a fast full-screen grapher. A flash app. Code written with AI (Claude Code); use at your own risk."
+plugins:
+  - jekyll-sitemap
+  - jekyll-seo-tag
+exclude:
+  - symce
+  - tools

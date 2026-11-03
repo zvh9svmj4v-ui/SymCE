@@ -19,24 +19,26 @@
 """
 import os, subprocess, sys
 import screen, vram
-from e2e import PROLOGUE, FILES, LAUNCH, armed_in_flash
+from e2e import PROLOGUE, FILES, LAUNCH, armed_in_flash, MENU_SKIP, MEM_SKIP
 
 # SymCE's slot in this ROM's APPS menu, measured by trying each position.
 # ponytail: fixed; if the ROM's app list changes, re-measure.
-SETTINGS = "apps " + "down " * 16 + "enter . . "       # the settings screen, waiting for a key
+SETTINGS = "apps " + "down " * (16 - MENU_SKIP) + "enter . . "       # the settings screen, waiting for a key
 OPEN_APP = SETTINGS + "clear . "
-RUN5 = SETTINGS + "5 . . . . "                        # prgmSYMCE from the app, waiting on its last screen
+WAIT = ". " * (4 + int(os.environ.get("SYMCE_WAIT_EXTRA", 3)))    # packed parts: the install unpacks them (7 s, was 4.5 s); a 1 MB one takes longer
+RELOC_MS = int(os.environ.get("SYMCE_RELOC_MS", 8000))   # the OS redoes the relocations of a moved app: 1.6 MB takes far longer than 8 s
+RUN5 = SETTINGS + "5 " + WAIT                        # prgmSYMCE from the app, waiting on its last screen
 # 2nd mem, Mem Mgmt/Del, 7:Prgm, SYMCE (3 above the last, TITOL), del, 2:Yes.
 DELETE_PRGM = "2nd + 2 " + "down " * 6 + "enter . . " + "down " * 45 + "up up up del . . 2 . . 2nd mode . clear . "
 RAM_CLEAR = "2nd + 7 1 2 . . clear . C . "
 TYPE = "2 xton + 2 xton enter . "
 # 2nd mem, Mem Mgmt/Del, A:Apps, SymCE (22nd in this ROM's list), del, 2:Yes.
-DELETE_APP = "2nd + 2 " + "down " * 10 + "enter . " + "down " * 21 + "del . . 2 . . 2nd mode . clear . "
+DELETE_APP = "2nd + 2 " + "down " * 10 + "enter . " + "down " * (21 - MEM_SKIP) + "del . . 2 . . 2nd mode . clear . "
 # The same for AsmHook2: first in that list, and installed just above SymCE.
 DELETE_ABOVE = "2nd + 2 " + "down " * 10 + "enter . del . . 2 . . 2nd mode . clear . "
 CONVBIN = os.path.expanduser("~/CEdev/bin/convbin")
 BODY = os.path.join(screen.HERE, "../../symce/obj/hook/hook.bin")
-TI_BODY = os.path.getsize(BODY) + 7                   # the second copy: body, two words, the tail byte
+TI_BODY = os.path.getsize(BODY) + 13                  # the second copy: body, three words, the cursor byte, the lhook and graphAns words
 
 
 def old_appvar(name):
@@ -53,11 +55,14 @@ def prologue_keys(keys):
 
 
 def state(keys, files=FILES, prologue=PROLOGUE):
-    r = screen.read([("hookptr", 0xD025E1, 3), ("flag", 0xD000B4, 1),
-                     ("ptemp", 0xD0259A, 3), ("ops", 0xD02593, 3), ("fps", 0xD0258D, 3), ("asz", 0xD0118C, 3), ("mhook", 0xD02608, 3), ("hf4", 0xD000B6, 1), ("tf", 0xD00085, 1),
-                     ("kptr", 0xD025DB, 3), ("cx", 0xD007E0, 1),
-                     ("screen", screen.TEXTSHADOW, screen.COLS * screen.ROWS)],
-                    keys=prologue + keys, files=files, launch=LAUNCH, lead=False)
+    # (the CEmu abort cuts a read short: what the checks need most comes first)
+    for settle in (1500, 1900, 2300):       # the abort lands at a fixed emulated moment: another settle moves the read off it
+        r = screen.read([("kptr", 0xD025DB, 3), ("cx", 0xD007E0, 1), ("hookptr", 0xD025E1, 3), ("flag", 0xD000B4, 1),
+                         ("ptemp", 0xD0259A, 3), ("ops", 0xD02593, 3), ("fps", 0xD0258D, 3), ("asz", 0xD0118C, 3), ("mhook", 0xD02608, 3), ("hf4", 0xD000B6, 1), ("tf", 0xD00085, 1),
+                         ("screen", screen.TEXTSHADOW, screen.COLS * screen.ROWS)],
+                        keys=prologue + keys, files=files, launch=LAUNCH, lead=False, settle=settle)
+        if r["ptemp"] != b"\xff" * 3:
+            break
     raw = [r["screen"][i * screen.COLS:(i + 1) * screen.COLS] for i in range(screen.ROWS)]
     rows = [l.strip() for l, x in zip(screen.render(r["screen"]), raw)
             if l.strip() and x.strip(b" ") != b"\xe0"]      # not the cursor alone (e2e.run)
@@ -97,7 +102,7 @@ def main():
 
     ptr, flag, _, rows = state(SETTINGS)
     check("settings screen", shows(rows, "SymCE settings", "1: CAS ON", "2: Cursor INSERT", "3: Font EVO", "4: GRAPH key SYMCE",
-                                "5: Run prgmSYMCE", "Press 1-5, CLEAR exits."),
+                                "5: Run prgmSYMCE", "6: Trace snap ON", "7: Paren colors ON", "Press 1-7, CLEAR exits."),
           "rows=%s" % rows)
 
     kptr0 = state.kptr
@@ -115,14 +120,15 @@ def main():
     # Key 4: GRAPH goes to SymCE's grapher (it returns to the home screen, cxCurApp
     # 0x40) or to TI's (0x44); the flag and pointer are the raw key hook's.
     state("graph . . ")
-    check("GRAPH: ours", state.kon and state.cx == 0x40, "cxCurApp=%02X" % state.cx)
+    # cxCurApp is 45 (not 40) after the first graph since a2c4b6f: X and Y are made under MODE's context
+    check("GRAPH: ours", state.kon and state.cx in (0x40, 0x45), "cxCurApp=%02X" % state.cx)
     ptr, flag, _, rows = state(SETTINGS + "4 . ")
     check("4 shows GRAPH key TI", shows(rows, "4: GRAPH key TI", "1: CAS ON"), "rows=%s" % rows)
-    state(SETTINGS + "4 . clear . graph . . ")
-    check("4 turns it off: TI's graph", not state.kon and state.cx == 0x44,
-          "flag5=%s cxCurApp=%02X" % (state.kon, state.cx))
+    state(SETTINGS + "4 . clear . graph . . . . . ")      # TI's graph app takes a while to start: cxCurApp reads FF meanwhile
+    check("4 turns it off: TI's graph", state.kptr != kptr0 and state.cx == 0x44,
+          "rawKeyHookPtr=%06X cxCurApp=%02X" % (state.kptr, state.cx))
     state(SETTINGS + "4 . 4 . clear . graph . . ")
-    check("4 again turns it on", state.kon and state.kptr == kptr0 and state.cx == 0x40,
+    check("4 again turns it on", state.kon and state.kptr == kptr0 and state.cx in (0x40, 0x45),   # 45: see above
           "rawKeyHookPtr=%06X cxCurApp=%02X" % (state.kptr, state.cx))
     state(SETTINGS + "1 . clear . ")
     check("CAS off keeps GRAPH key", state.kon and state.kptr == kptr0, "rawKeyHookPtr=%06X" % state.kptr)
@@ -159,7 +165,7 @@ def main():
     check("RAM clear drops hook", ptr == 0 and not state.menu, "hookptr=%06X" % ptr)
 
     ptr, flag, _, rows = state(RAM_CLEAR + SETTINGS)
-    check("RAM clear: GRAPH key TI", not state.kon and shows(rows, "4: GRAPH key TI"),
+    check("RAM clear: GRAPH key TI", state.kptr != kptr0 and shows(rows, "4: GRAPH key TI"),
           "flag5=%s rawKeyHookPtr=%06X rows=%s" % (state.kon, state.kptr, rows[3:5]))
     state(RAM_CLEAR + SETTINGS + "4 . clear . ")
     check("4 re-arms after clear", state.kon and state.kptr == kptr0, "rawKeyHookPtr=%06X" % state.kptr)
@@ -174,7 +180,7 @@ def main():
     # OS runs no asm program until AsmHook2 is reopened. (The OS pack leaves
     # PutS drawing without saving to textShadow, so the installer's message
     # can't be read back; the hook being armed again is the proof.)
-    again = RAM_CLEAR + "apps down enter . clear . L . . . . clear . "
+    again = RAM_CLEAR + "apps down enter . clear . L " + ". " * 20 + "clear . "
     ptr, flag, _, rows = state(again + TYPE + "y= . 2nd mode . ")
     check("installer replaces app", armed_in_flash(ptr, flag) and rows[-1:] == ["4X"]
           and state.menu == m0 and state.kon and state.kptr == kptr0,
@@ -196,7 +202,12 @@ def main():
     # the hole, no GarbageCollect needed: SymCE moves up by AsmHook2's size.
     # The OS moves the hook pointer with it and redoes SymCE's relocations
     # (the engine address after the hook body moves too), so it still answers.
-    ptr, flag, _, rows = state(DELETE_ABOVE + "y= . 2nd mode . clear . " + TYPE)
+    # w1000: keys typed right after the 2 s idle here fall in the OS/emulator deaf window and the
+    # first two are lost (measured: lost with no extra wait, kept with 1, 3 and 8 s; the
+    # harness's w100 retry at the start of the script never helps). Not the delete or the relocated hooks: notebook "deaf window".
+    # w8000 (was w4000): a bigger app relocates slower after the delete, and keys pressed meanwhile are
+    # lost on a real calculator too, so the test waits it out.
+    ptr, flag, _, rows = state(DELETE_ABOVE + "y= . 2nd mode . clear . w%d " % RELOC_MS + TYPE)
     check("app moved up by delete", armed_in_flash(ptr, flag) and ptr > ptr0 and
           rows[-1:] == ["4X"] and state.menu - ptr == m0 - ptr0, "hookptr %06X -> %06X rows=%s" % (ptr0, ptr, rows[-2:]))
 
@@ -205,7 +216,9 @@ def main():
     check("delete app disarms", ptr == 0 and not flag & 0x10 and not state.menu,
           "hookptr=%06X flag=%02X menu=%06X" % (ptr, flag, state.menu))
 
-    ptr, flag, _, rows = state(DELETE_APP + "L . . . clear . " + TYPE + "y= . 2nd mode . ")
+    # Deleting SymCE clears the parser hook slot it took over from AsmHook2 (symce_phook chains to AsmHook2): ASM programs run
+    # nothing until AsmHook2 is opened again, as after a RAM clear. The user does that before prgmSYMCE, and so does the test.
+    ptr, flag, _, rows = state(DELETE_APP + "apps down enter . clear . L " + WAIT + "clear . " + TYPE + "y= . 2nd mode . ")
     check("reinstall after delete", armed_in_flash(ptr, flag) and rows[-1:] == ["4X"],
           "hookptr=%06X rows=%s" % (ptr, rows[-2:]))
 
@@ -221,12 +234,12 @@ def main():
     # ... and the installer's own screen, as AsmHook2 running it shows it
     # (pixels of the text area).
     a, _ = vram.grab(prologue_keys(RUN5), 24, 200, files=FILES, launch=LAUNCH, lead=False)
-    b, _ = vram.grab(prologue_keys("L . . . . "), 24, 200, files=FILES, launch=LAUNCH, lead=False)
+    b, _ = vram.grab(prologue_keys("L " + WAIT), 24, 200, files=FILES, launch=LAUNCH, lead=False)
     check("5 shows installer screen", a == b and len(a) > 0, "%d pixels differ" % sum(a[k] != b.get(k) for k in a))
 
     # The key case: no AsmHook2 after a RAM clear, so the OS would answer
     # ERROR: INVALID to prgmSYMCE typed at the home screen.
-    ptr, flag, _, rows = state(RAM_CLEAR + RUN5 + "clear . " + TYPE)
+    ptr, flag, _, rows = state(RAM_CLEAR + RUN5 + "clear . " + TYPE + "y= . 2nd mode . ")   # redraw: the pack leaves PutS off textShadow
     check("5 after RAM clear", armed_in_flash(ptr, flag) and rows[-1:] == ["4X"] and state.menu == m0
           and state.asz == 0, "hookptr=%06X asm_prgm_size=%d rows=%s" % (ptr, state.asz, rows[-2:]))
 

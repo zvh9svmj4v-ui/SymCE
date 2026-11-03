@@ -115,7 +115,7 @@ def gpx(g):
 
 
 def gpy(g):
-    return ((164 - g) * 218 + 82) // 164
+    return ((164 - g) * 239 + 82) // 164
 
 
 def marks(r, spec):
@@ -239,7 +239,7 @@ def box(r, spec, a, b):
         for t in out:
             gx = g(t)
             if 0 <= gx <= 264:
-                wa = window(a["px"], gpx(gx), gpy(133), (0, 0, 319, 219))
+                wa = window(a["px"], gpx(gx), gpy(133), (0, 0, 319, 240))
                 wb = window(b["px"], 27 + gx, 210 - 133, (28, 47, 291, 210))
                 d = [k for k in wa if k in wb and wa[k] != wb[k]]
                 if d:
@@ -273,7 +273,7 @@ def check(name, spec, fall):
     if spec and spec[0][0] == "N":
         if a["px"] == b["px"]:
             return "SymCE's screen is TI's (it fell back)"
-        ra, rb = (0, 0, 319, 219), (28, 47, 291, 210)
+        ra, rb = (0, 0, 319, 240), (28, 47, 291, 210)
         for p, gx, gy in normmarks(b, spec):
             if not (0 <= gx <= 264 and 0 <= gy <= 164):
                 continue
@@ -287,7 +287,7 @@ def check(name, spec, fall):
         return "SymCE's screen is TI's (it fell back)" if a["px"] == b["px"] else box(b, spec, a, b)
     if spec and spec[0][0] == "H":
         return hist(b, spec, a, b)
-    ra, rb = (0, 0, 319, 219), (28, 47, 291, 210)      # TI's grid minus its edge row and column (the frame shows there)
+    ra, rb = (0, 0, 319, 240), (28, 47, 291, 210)      # TI's grid minus its edge row and column (the frame shows there)
     for p, gx, gy in marks(b, spec):
         if not (0 <= gx <= 264 and 0 <= gy <= 164) or p[0] == 1:
             continue
@@ -376,7 +376,7 @@ def tracecase(name, show=False):
             dx, dy = real(T.rdb(b, 0xD01FAE, 9)), real(T.rdb(b, 0xD01FB7, 9))
             gx, gy = grid(xs[ex[1]], mn, dx), grid(ys[ex[1]], my, dy)
             if 0 <= gx <= 264 and 0 <= gy <= 164:
-                wa = window(a["px"], gpx(gx), gpy(gy), (0, 0, 319, 219), 4)
+                wa = window(a["px"], gpx(gx), gpy(gy), (0, 0, 319, 240), 4)
                 wb = window(b["px"], 27 + gx, 210 - gy, (28, 47, 291, 210), 4)
                 d = [q for q in wa if q in wb and TMASK[q[1] + 4][q[0] + 4] == "#" == TMASK2[q[1] + 4][q[0] + 4] and (wa[q], wb[q]) != (0, 0)]   # the ring both frames draw
                 if d:

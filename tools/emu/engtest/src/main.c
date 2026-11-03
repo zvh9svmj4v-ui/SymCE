@@ -22,7 +22,7 @@
 uint8_t symce_engine(const uint8_t *in, unsigned len, uint8_t *out, void *work,
                      const uint8_t *ans, uint8_t mode, const uint8_t *(*look)(uint8_t));
 
-static uint8_t work[0x4000];        /* engine.c asserts its pool fits in this */
+static uint8_t work[0x4900];        /* engine.c asserts the pool and nested()'s buffers fit in 0x4F00; the step log ends at 0x48F0 */
 
 typedef struct {
     char     magic[4];              /* "RUN!" while going, "DONE" at the end */

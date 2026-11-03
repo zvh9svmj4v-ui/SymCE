@@ -6,32 +6,14 @@ guess: record editTop while the line is still virgin, compare at ENTER. The
 baseline moves as history grows, which is why it has to be captured per entry
 rather than hardcoded -- that is what killed every earlier attempt.
 """
-import json, os, re, subprocess, sys, crcread
-HERE=os.path.dirname(os.path.abspath(__file__))
-ROM=os.path.expanduser("~/CEdev/ti84pce.rom")
-TESTER=os.path.expanduser("~/CEdev/bin/cemu-autotester")
+import e2e, screen
 
-def read(keys, probes, boot=2500, per_key=220):
-    seq=["delay|%d"%boot]
-    for k in keys.split():
-        seq += ["delay|1500"] if k=="." else ["key|"+k,"delay|%d"%per_key]
-    seq += ["delay|1200"]
-    hashes={}
-    for i,(n,a,sz) in enumerate(probes,1):
-        seq.append("hash|%d"%i)
-        hashes[str(i)]={"description":n,"start":a,"size":str(sz),
-                        "expected_CRCs":["00000000"]}
-    cfg={"transfer_files":["DEMO.8xp"],"target":{"name":"DEMO","isASM":True},
-         "sequence":seq,"hashes":hashes}
-    p=os.path.join(HERE,"_et.json"); json.dump(cfg,open(p,"w"))
-    r=subprocess.run([TESTER,p],capture_output=True,text=True,
-                     env=dict(os.environ,AUTOTESTER_ROM=ROM),cwd=HERE)
-    if "unknown key" in r.stderr: sys.exit("BAD KEY:\n"+r.stderr)
-    out={}
-    for _,name,c in re.findall(r'Hash #(\d+) \("([^"]*)"\).*?got ([0-9A-F]{1,8})\)', r.stdout):
-        sz=dict((x[0],x[2]) for x in probes)[name]
-        out[name]=int.from_bytes(crcread.invert(int(c,16),sz),"little")
-    return out
+
+def read(keys, probes):
+    """The probes after the keys, MathPrint, through the SymCE app (screen.read: the old DEMO.8xp harness is gone)."""
+    r = screen.read([(n, int(a, 16), sz) for n, a, sz in probes], keys=e2e.PROLOGUE.replace("C ", "", 1) + keys,
+                    files=e2e.FILES, launch=e2e.LAUNCH, lead=False, settle=1200)
+    return {n: int.from_bytes(r[n], "little") for n, _, _ in probes}
 
 P=[("top","0xD02437",3),("cur","0xD0243A",3),("tail","0xD0243D",3),
    ("btm","0xD02440",3),("cmd","0xD0008C",1),("tf","0xD00085",1)]

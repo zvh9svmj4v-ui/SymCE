@@ -12,3 +12,7 @@ __pycache__/
 tools/emu/_*
 tools/emu/engtest/src/vectors.h
 !tools/emu/old/*.8xv
+tools/emu/engtest/engine_nods.s
+tools/emu/engtest/engine_side.s
+tools/emu/engtest/engine_cli_noside
+/tools/bin

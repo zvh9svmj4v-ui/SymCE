@@ -8,6 +8,7 @@ COMPRESSED = NO
 ARCHIVED = NO
 HAS_PRINTF = NO
 CFLAGS = -Wall -Wextra -Oz
-EXTRA_ASMSOURCES = ../../../symce/obj/engine/engine.s
+# engine_device.py sets ENGINE_S: the app's engine.s, or one built with -DNODESOLVE
+EXTRA_ASMSOURCES = $(ENGINE_S)
 
 include $(shell cedev-config --makefile)

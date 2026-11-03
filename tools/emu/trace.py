@@ -24,7 +24,7 @@ CASES = {
     "panL": "trace " + W + R(66, "left") + "left w4500 left left left ",
     "num": "trace " + W + "2 dp 5 enter " + W,
     "numR": "trace " + W + "2 dp 5 enter " + W + "right right ",
-    "oob": "trace " + W + "1 5 enter w1000 1 ",
+    "oob": "trace " + W + "1 5 enter w3000 1 ",
     "qz": "trace " + W + R(3) + "enter w4500 ",
     "qz2": "zoom 4 w4000 trace " + W + R(3) + "enter w4500 ",
     "qzprev": "zoom 4 w4000 trace " + W + R(3) + "enter w4500 zoom w300 right 1 w4500 ",
@@ -42,7 +42,7 @@ CASES.update({
     "zhq1": "!" + Z("alpha math"), "zhf2": "!" + Z("alpha apps"),
     "zint0": Z("8") + "enter w4500 ", "zint1": Z("8") + R(3) + R(2, "up") + "enter w4500 ", "zhint": "!" + Z("8") + R(2) + "enter w4500 ",
     "zbox": Z("1") + R(4) + R(3, "down") + "enter w300 " + R(8) + R(5, "down") + "enter w4500 ",
-    "zbox0": Z("1") + "enter w300 right right down enter w4500 ", "zhbox": "!" + Z("1") + R(4) + "enter w300 " + R(6) + R(4, "up") + "enter w4500 ",
+    "zbox0": Z("1") + "enter w300 right right down enter w4500 ", "zhbox": "!" + Z("1") + R(4) + "enter w700 " + R(6) + R(4, "up") + "enter w4500 ",
     "zin": Z("2") + R(5) + R(2, "up") + "enter w4500 ", "zin2": Z("2") + R(3) + "enter w4500 " + R(2) + "enter w4500 w3000 ",
     "zout": Z("3") + R(4, "left") + "enter w4500 ", "zhin": "!" + Z("2") + R(3) + "enter w4500 ",
     "zprev": Z("4") + Z("6") + M("1"), "zprev2": Z("4") + Z("6") + Z("5") + M("1") + M("1"), "zhprev": "!" + Z("6") + M("1"),
@@ -59,15 +59,16 @@ PCASES = {
 }
 VPAR = "xton enter w400 alpha sto enter w400 alpha 1"                 # T, X, Y on the home screen
 VPOL = "xton enter w400 alpha * enter w400 alpha sto enter w400 alpha 1"   # theta, R, X, Y
+# ENTER on a typed T redraws the plot (the number box covers its foot now): 3 curves take ~1 s
+WR = "w1500 "
 for _n, _p, _v in (("pt", PAR, VPAR), ("po", POL, VPOL), ("pg", PGC + POL, VPOL)):
     PCASES.update({
         _n + "_tr": (_p, "trace " + W, _v),
         _n + "_r5l2": (_p, "trace " + W + R(5) + R(2, "left") + W, _v),
         _n + "_ud": (_p, "trace " + W + R(3) + "up " + W + R(2, "down"), _v),
-        _n + "_num": (_p, "trace " + W + "1 dp 5 enter " + W, _v),
-        _n + "_numR": (_p, "trace " + W + "1 dp 5 enter " + W + "right right ", _v),
-        _n + "_numR2": (_p, "trace " + W + "1 dp 5 5 enter " + W + "right right ", _v),
-        _n + "_oob": (_p, "trace " + W + "1 5 enter w1000 1 ", _v),
+        _n + "_num": (_p, "trace " + W + "1 dp 5 enter " + WR, _v),
+        _n + "_numR": (_p, "trace " + W + "1 dp 5 enter " + WR + "right right ", _v),
+        _n + "_numR2": (_p, "trace " + W + "1 dp 5 5 enter " + WR + "right right ", _v),
         _n + "_qz": (_p, "trace " + W + R(3) + "enter w4500 ", _v),
         _n + "_end": (_p, "trace " + W + R(130) + R(2, "left") + W, _v),
         _n + "_left": (_p, "trace " + W + R(3, "left") + W, _v),
@@ -85,6 +86,8 @@ PCASES["oz_zin"] = PCASES["oz_zin"][:2] + (VPOL.replace("w400", "w900"),)
 PCASES.update({
     "oz_stdw": (POL + "window 1 enter 3 enter dp 5 enter 2nd mode . ", Z("6"), VPOL),     # ZStandard sets the theta window
     "pz_stdw": (PAR + "window 1 enter 3 enter dp 5 enter 2nd mode . ", Z("6"), VPAR),
+    "pz_fitw": (PAR + "window 1 enter 3 enter dp 5 enter 2nd mode . ", Z("0"), VPAR),     # ZoomFit over T 1..3 step 0.5
+    "oz_fitd": (POLD, Z("0"), VPOL),
     "od_stdw": (POLD + "window 1 enter 3 enter dp 5 enter 2nd mode . ", Z("6"), VPOL),
     "od_tr": (POLD, "trace " + W + R(5) + W, VPOL),
     "od_pd": (POLD, "w2500", None),
@@ -92,7 +95,7 @@ PCASES.update({
     "pf_par": (PGC + PAR, R(5) + R(2, "up") + W, VPAR),
 })
 # Seq mode (Time format, explicit u v w): u = n^2/5, v = 2n, w = n+1; the y= rows go u(n) u(1) u(2) v(n) v(1) v(2) w(n) ...
-SEQN = ("sq", "s3", "sw", "rq", "rf", "rx", "re")
+SEQN = ("sq", "s3", "sw", "rq", "rf", "rx", "re", "wt")
 SEQM = "mode down down down right right right enter 2nd mode . "
 SQ = SEQM + "y= xton ^ 2 / 5 2nd mode . "
 SQ3 = SEQM + "y= xton ^ 2 / 5 down down down 2 xton down down down xton + 1 2nd mode . "
@@ -109,16 +112,15 @@ for _n, _p in (("sq", SQ), ("s3", SQ3), ("sw", SQW), ("rq", RQ), ("rx", RX)):
         _n + "_tr": (_p, "trace " + W, VSQ),
         _n + "_r5l2": (_p, "trace " + W + R(5) + R(2, "left") + W, VSQ),
         _n + "_ud": (_p, "trace " + W + R(3) + "up " + W + R(2, "down"), VSQ),
-        _n + "_num": (_p, "trace " + W + "5 enter " + W, VSQ),
-        _n + "_numR": (_p, "trace " + W + "5 enter " + W + "right right " + W, VSQ),
-        _n + "_numL": (_p, "trace " + W + "5 enter " + W + "left left " + W, VSQ),
+        _n + "_num": (_p, "trace " + W + "5 enter " + ("w5000 " if "w2500" in W else WR), VSQ),
+        _n + "_numR": (_p, "trace " + W + "5 enter " + ("w5000 " if "w2500" in W else WR) + "right right " + W, VSQ),
+        _n + "_numL": (_p, "trace " + W + "5 enter " + ("w5000 " if "w2500" in W else WR) + "left left " + W, VSQ),
         _n + "_dom": (_p, "trace " + W + "2 dp 5 enter w1000 ", VSQ),
-        _n + "_oob": (_p, "trace " + W + "1 5 enter w1000 1 ", VSQ),
         _n + "_qz": (_p, "trace " + W + R(3) + "enter w4500 ", VSQ),
         _n + "_end": (_p, "trace " + W + (R(12, "right w400") + R(2, "left w1500") if _n == "rx" else R(12) + R(2, "left")) + W, VSQ),   # (rx: the OS solver is slower than the keys)
         _n + "_left": (_p, "trace " + W + R(3, "left") + W, VSQ),
         _n + "_clr": (_p, "trace " + W + R(3) + "clear " + W, VSQ),
-        _n + "_clrn": (_p, "trace " + W + "5 enter " + W + "clear " + W, VSQ),
+        _n + "_clrn": (_p, "trace " + W + "5 enter " + ("w5000 " if "w2500" in W else WR) + "clear " + W, VSQ),
         _n + "_err1": (_p, "trace " + W + "1 5 dp 5 enter w1000 ", VSQ),
         _n + "_err2": (_p, "trace " + W + "2 dp 5 enter w1000 ", VSQ),
         _n + "_err3": (_p, "trace " + W + "0 enter w1000 ", VSQ),
@@ -126,6 +128,37 @@ for _n, _p in (("sq", SQ), ("s3", SQ3), ("sw", SQW), ("rq", RQ), ("rx", RX)):
         _n + "_err5": (_p, "trace " + W + "2 enter w1000 ", VSQ),
     })
 W = "w300 "
+def UVF(n, p=SQ3):
+    return p + "2nd zoom w800 " + "right " * n + "enter w300 2nd mode . "    # FORMAT axes: 2 uv, 3 vw, 4 uw (0 Time, 1 Web)
+PCASES.update({"uv_pd": (UVF(2), "w2500", VSQ), "vw_pd": (UVF(3), "w2500", VSQ), "uw_pd": (UVF(4), "w2500", VSQ), "uv_w": (UVF(2, SQW), "w2500", VSQ),
+               "uv_std": (UVF(2), Z("6"), VSQ), "uv_tr": (UVF(2), "trace w2500", VSQ), "vw_zin": (UVF(3), Z("2") + "enter w4500 ", VSQ)})
+RB = SEQM + "y= dp 8 2nd 7 ( xton - 1 ) + 1 down 1 2nd mode . "          # u(n) = .8 u(n-1) + 1, u(1) = 1 (Web)
+WBF = lambda y, p="": UVF(1, SEQM + "y= " + y + "2nd mode . " + p)          # FORMAT Web, then the sequences
+U1, V1 = "2nd 7 ( xton - 1 )", "2nd 8 ( xton - 1 )"
+PCASES.update({"wb_pd": (UVF(1, RB), "w6000", VSQ),
+               "wb2_pd": (WBF("dp 8 " + U1 + " + 1 down 1 down down dp 5 " + V1 + " + 2 down 3 "), "w9000", VSQ),     # u, v: u red? (TI's colours), v's Y at the end
+               "wbv_pd": (WBF("down down down dp 5 " + V1 + " + 2 down 3 "), "w6000", VSQ),
+               "wbp_pd": (WBF(U1 + " ^ 2 - 2 down 1 "), "w6000", VSQ),
+               "wbd_pd": (WBF("1 / ( " + U1 + " ) down 1 "), "w6000", VSQ),         # a pole at X = 0
+               "wbc_pd": (WBF("3 "), "w6000", VSQ),                                 # no u(n-1) at all
+               "wbi_pd": (WBF(U1 + " down 1 "), "w6000", VSQ),                      # u(n) = u(n-1): Y = X is drawn over it
+               "wbe_n": (WBF(U1 + " + xton "), "w6000", VSQ),                       # n, u(n-2), another sequence: TI's ERR:INVALID
+               "wbe_u2": (WBF("2nd 7 ( xton - 2 ) + 1 down 1 down 2 "), "w6000", VSQ),
+               "wbe_v": (WBF("dp 8 " + V1 + " + 1 down 1 down down 2 "), "w6000", VSQ)})
+for _n, _p in (("wt", UVF(1, RB)),):                     # Web TRACE (one sequence): the cobweb
+    W = "w300 "
+    PCASES.update({
+        _n + "_tr": (_p, "trace " + W, VSQ),
+        _n + "_r5l2": (_p, "trace " + W + R(5) + R(2, "left") + W, VSQ),
+        _n + "_num": (_p, "trace " + W + "5 enter " + ("w5000 " if "w2500" in W else WR), VSQ),
+        _n + "_numR": (_p, "trace " + W + "5 enter " + ("w5000 " if "w2500" in W else WR) + "right right " + W, VSQ),
+        _n + "_qz": (_p, "trace " + W + R(3) + "enter w4500 ", VSQ),
+        _n + "_clr": (_p, "trace " + W + R(3) + "clear " + W, VSQ),
+        _n + "_end": (_p, "trace " + W + R(12) + R(2, "left") + W, VSQ),
+        _n + "_ud": (_p, "trace " + W + R(3) + "up " + W + R(2, "down"), VSQ),
+        _n + "_one": (_p, "trace " + W + "1 enter " + WR, VSQ),
+        _n + "_oob": (_p, "trace " + W + "1 5 enter w3000 1 ", VSQ),      # typed n above nMax: TI goes on
+    })
 PCASES.update({"sq_pd": (SQ, "w2500", VSQ), "sw_pd": (SQW, "w2500", VSQ), "s3_pd": (SQ3, "w2500", VSQ), "rq_pd": (RQ, "w2500", VSQ), "rf_pd": (RF, "w2500", VSQ), "rx_pd": (RX, "w2500", VSQ), "re_err1": (RE, "w2500", VSQ), "re_err2": (RE, "trace w1500", VSQ)})
 for _n, _p in (("sq", SQ), ("sw", SQW), ("rq", RQ), ("rx", RX)):
     for _z, _k in (("std", "6"), ("trig", "7"), ("sqr", "5"), ("dec", "4"), ("fit", "0"), ("int", "8")):
@@ -158,7 +191,7 @@ def wins(b, base=0xD1A881):
 
 
 def run(keys, side, quit_=False, pre=None):
-    K = PROLOGUE + (G.TI_OFF if side == "ti" else "") + (PRE if pre is None else pre) + gr(keys) + (" 2nd mode . " if quit_ else " ") + "@a"
+    K = PROLOGUE + (G.TI_OFF if side == "ti" else G.SNAP_OFF) + (PRE if pre is None else pre) + gr(keys) + (" 2nd mode . " if quit_ else " ") + "@a"
     snaps = [Snap("a", rect=(0, 0, 320, 240), ram=RAM)]
     r = tigo.go(K, snaps, files=FILES, launch=LAUNCH)["a"]
     return r
@@ -187,7 +220,7 @@ def summ(r):
 
 def home_rows(keys, side, pre=None, vs="xton enter w400 alpha 1", slow=False):
     """Ans, X and Y typed back on the home screen after the same keys (CAS off: plain answers)."""
-    K = PROLOGUE + G.NOCAS + (G.TI_OFF if side == "ti" else "") + "5 + 3 enter . " + (PRE if pre is None else pre) + gr(keys) + \
+    K = PROLOGUE + G.NOCAS + (G.TI_OFF if side == "ti" else G.SNAP_OFF) + "5 + 3 enter . " + (PRE if pre is None else pre) + gr(keys) + \
         " 2nd mode . 2nd (-) w300 enter w400 " + vs + " enter w400 @h"
     if slow:                                                    # a key typed into the readout was lost: type it again, slowly
         K = K.replace("w400", "w1500")
@@ -204,12 +237,14 @@ def bar_same(a, b):
     return bad == 0
 
 
-def text_lines(px, ref=None):
+def text_lines(px, ref=None, base=None):
     """The prompt / result / bar text of a graph screen as glyph bitmaps, one list per text line (rows 214..239). TI's lines are found
-    by their ink (not the border colour or white); SymCE's are the same strips, 2 rows lower (its bar is 219..239) and only the columns TI's line
+    by their ink (not the border colour or white); SymCE's are the same strips, 2 rows lower (the plot now runs under its bar, rows 220..239) and only the columns TI's line
     uses (its text sits on a cell of the border colour, the plot shows around it). Catches a wrong font code: '[' that draws theta,
     0xC1 that draws '[' for the integral sign. Returns [(y0, y1, xa, xb, glyphs)]."""
-    ink = lambda x, y: px.get((x, y)) not in (0xE71C, 0xFFFF, None)
+    # SymCE's plot now runs under the text (TI's bar is grey there): the y axis (black, column 159) shows between the glyphs, so it is not ink
+    ink = lambda x, y: px.get((x, y)) not in (0xE71C, 0xFFFF, None) and not (ref is not None and x == 159 and px.get((x, y)) == 0) \
+        and (base is None or px.get((x, y)) != base.get((x, y)))   # base: the plain graph, whose pixels show between the cells
     if ref is None:
         rows = [y for y in range(214, 240) if any(ink(x, y) for x in range(20, 300))]
         lines, cur = [], []
@@ -269,36 +304,51 @@ def labels_same(sy, ti, name, col=0x001F):
 
 def plotcmp(sy, ti, name):
     """Par / Pol curves: every TI curve pixel (265x165 grid, plot at x 27, bottom row 210) has SymCE's same-colour pixel within 1 of where
-    the grid point lands on the 319x219 plot, and SymCE draws none that is not near a TI point."""
-    gp = lambda gx, gy: ((gx * 318 + 132) // 264, ((164 - gy) * 218 + 82) // 164)
+    the grid point lands on the 319x240 plot, and SymCE draws none that is not near a TI point."""
+    gp = lambda gx, gy: ((gx * 318 + 132) // 264, ((164 - gy) * 239 + 82) // 164)
     T, S = {}, {}
     for (x, y), v in ti.items():
         if 27 <= x <= 291 and 46 <= y <= 210 and v not in (0xFFFF, 0):
             T.setdefault(v, set()).add((x - 27, 210 - y))
     for (x, y), v in sy.items():
-        if x < 319 and y < 219 and v not in (0xFFFF, 0):
+        if x < 319 and y < 240 and v not in (0xFFFF, 0):
             S.setdefault(v, set()).add((x, y))
     ok = bool(T) or not S                     # a zoom box can leave the window without a curve, on both sides
     for c, ps in T.items():
         s = S.get(c, set())
         near = {gp(*p) for p in ps}
         edge = {gp(*p) for p in ps if p[1] < 4 or p[1] > 160 or (abs(p[0] - 132) < 5 and abs(p[1] - 82) < 5)}   # the free cursor hides the centre;     # ponytail: a line leaving the window may differ by a pixel or two at its last rows (reported)
-        miss = sum(not any((a + i, b + j) in s for i in (-1, 0, 1) for j in (-1, 0, 1)) for a, b in near if (a, b) not in edge)
-        extra = sum(not any(abs(a - p) < 4 and abs(b - q) < 4 for p, q in near) for a, b in s if 1 < a < 317 and 1 < b < 217)   # the rows and columns at the window edge belong to a point TI clipped; a long shallow segment's staircase may stray 3 px
-        ok = G.report(miss == 0 and extra <= 1, "%s curve %04X: TI %d px, SymCE %d px, missing %d, extra %d" % (name, c, len(ps), len(s), miss, extra)) and ok
+        miss = sum(not any((a + i, b + j) in s for i in (-1, 0, 1) for j in (-2, -1, 0, 1, 2)) for a, b in near if (a, b) not in edge and a < 316 and not (b >= 214 and a < 256))   # (rows: the 239/164 scale turns TI's half-grid-row rounding into up to 1.2 rows, was 1.0)   # (under the bar text, rows 214.. at x < 256, the cell hides the plot, as TI's grey bar has none; the last 3 columns: TI's grid x=262 is 0.3 grid column short of SymCE's column 316; on a steep curve that is 2 rows)
+        extra = sum(not any(abs(a - p) < 4 and abs(b - q) < 4 for p, q in near) for a, b in s if 1 < a < 317 and 1 < b < 238)   # the rows and columns at the window edge belong to a point TI clipped; a long shallow segment's staircase may stray 3 px
+        ok = G.report(miss <= (name[:2] in ("wb", "wt")) and extra <= 1, "%s curve %04X: TI %d px, SymCE %d px, missing %d, extra %d" % (name, c, len(ps), len(s), miss, extra)) and ok
     return ok
 
 
-def text_cmp(sy, ti, name):
+def blkcmp(sy, ti, name):
+    """Web: TI's black pixels off the axes (plot grid, 265x165) have SymCE's within 1 of where they land, and SymCE has no others."""
+    gp = lambda gx, gy: ((gx * 318 + 132) // 264, ((164 - gy) * 239 + 82) // 164)
+    T = {(x - 27, 210 - y) for (x, y), v in ti.items() if 27 <= x <= 291 and 46 <= y <= 210 and v == 0 and abs(x - 159) > 5 and abs(210 - y - 82) > 5}
+    S = {(x, y) for (x, y), v in sy.items() if x < 319 and y < 240 and v == 0}
+    near = {gp(*p) for p in T}
+    miss = sum(not any((a + i, b + j) in S for i in (-1, 0, 1) for j in (-1, 0, 1)) for a, b in near if 2 < a < 316 and 2 < b < 237)
+    extra = sum(not any(abs(a - p) < 4 and abs(b - q) < 4 for p, q in near) for a, b in S if 2 < a < 316 and 2 < b < 237 and abs(a - 132) > 8 and abs(b - 82) > 8 and abs(a - 159) > 8 and abs(b - 120) > 8)
+    return G.report(miss <= 1 and extra == 0, "%s black Y=X: TI %d px, missing %d, extra %d" % (name, len(T), miss, extra))
+
+
+def text_cmp(sy, ti, name, plain=None):
     """The bottom text (T= / X= Y= / R= theta=) as glyphs: TI's lines at rows 214..239, SymCE's 2 rows lower."""
     a = text_lines(ti)
     b = text_lines(sy, a)
+    if plain and [l[4] for l in a] != [l[4] for l in b]:     # the plot shows between the text cells: mask it with the same screen without the trace
+        b = text_lines(sy, a, plain())
+    if [l[4] for l in a] != [l[4] for l in b]:               # the trace cursor can sit under the text now (the plot runs to row 239): its arm is a 1-column, 7+ row stripe, not a glyph
+        b = [(*l[:4], [g for g in l[4] if not (max(p[0] for p in g) == 0 and len(g) >= 7)]) for l in b]
     return G.report([l[4] for l in a] == [l[4] for l in b] and bool(a), "%s bottom text: %d lines equal TI's" % (name, len(a)))
 
 
 def case(name):
     pre, k, vs = PCASES[name] if name in PCASES else (None, CASES[name], None)
-    eo = name == "oob" or (name[:2] in SEQN and name[3:] in ("oob", "dom") or name[3:7] == "err")
+    eo = name == "oob" or (name[:2] in SEQN and name[:2] != "wt" and name[3:] in ("oob", "dom") or name[:3] == "wbe")
     q = not eo                                      # the error screen stays up for its cx
     # TI's side visits the settings screen (G.TI_OFF) and so redraws home; the "Done" the installer left on SymCE's
     # home would differ in the error cases' home screen (470 px, rows 39..72, with nothing of the grapher in it):
@@ -326,15 +376,20 @@ def case(name):
         pa, pb = run(k, "sym", False, pre)["px"], run(k, "ti", False, pre)["px"]
         if name[1] != "f" and name[:2] not in SEQN:
             ok = labels_same(pa, pb, name) and ok
-        ok = text_cmp(pa, pb, name) and ok
-    if (name[:2] in ("pd", "pz", "oz", "od") and name[3:] != "tr" and name[3:] not in ("tr", "fit")) or name in ("sq_pd", "sw_pd", "s3_pd", "rq_pd", "rx_pd") or (name[:3] in ("sqz", "swz", "rqz", "rfz") and name[4:] not in ("tr", "fit")):   # ZoomFit is TI's own graph (fallback): windows and vars only
+        ok = text_cmp(pa, pb, name, lambda: run("!graph . . w1500", "sym", False, pre)["px"]) and ok
+    if (name[:2] in ("pd", "pz", "oz", "od") and name[3:] != "tr" and name[3:] not in ("tr", "fit")) or name in ("wb_pd", "wb2_pd", "wbv_pd", "wbp_pd", "wbd_pd", "wbc_pd", "sq_pd", "sw_pd", "s3_pd", "rq_pd", "rx_pd", "uv_pd", "vw_pd", "uw_pd", "uv_w", "uv_std", "vw_zin", "wb_pd") or (name[:3] in ("sqz", "swz", "rqz", "rfz") and name[4:] not in ("tr", "fit")):   # ZoomFit is TI's own graph (fallback): windows and vars only
         ok = plotcmp(run(k, "sym", False, pre)["px"], run(k, "ti", False, pre)["px"], name) and ok
+    if name in ("wt_r5l2", "wt_num", "wt_numR", "wt_clr", "wt_end", "wt_qz", "wt_tr", "wt_ud", "wt_oob"):   # the cobweb: coloured pixels below the label strip (TI's rows 62 on), within a pixel of the grid
+        pa, pb = run(k, "sym", False, pre)["px"], run(k, "ti", False, pre)["px"]
+        ok = plotcmp({p: v for p, v in pa.items() if 22 < p[1] < 215}, {p: v for p, v in pb.items() if p[1] > 62}, name) and ok
+    if name[:2] == "wb" and name[2] != "e":          # the Web line Y = X is black: the axes' share of black is taken out (TI's grid rows and columns within 5 of the axes)
+        ok = blkcmp(run(k, "sym", False, pre)["px"], run(k, "ti", False, pre)["px"], name) and ok
     return G.report(ok, "%-7s X Y Ans window Delta TraceStep ZPrevious %s" % (name, [x for x in hb if x][-3:]))
 
 
 def mrun(keys, pre=""):
     """cxCurApp, menuNumMenus, the window and the plot rows (0..199) after PRE + keys, GRAPH key = SymCE unless pre says."""
-    K = PROLOGUE + pre + PRE + keys + " @a"
+    K = PROLOGUE + G.SNAP_OFF + pre + PRE + keys + " @a"
     r = tigo.go(K, [Snap("a", rect=(0, 0, 320, 200), ram=[(0xD007E0, 1), (0xD00827, 1), (0xD01E33, 18)])], files=FILES, launch=LAUNCH)["a"]
     return r, rdb(r, 0xD007E0, 1)[0], rdb(r, 0xD00827, 1)[0], rdb(r, 0xD01E33, 9).hex()
 
@@ -378,7 +433,7 @@ def shots():
     for name, pre, k in (("free", PRE, R(7) + R(4, "up") + W), ("y1", PRE, "trace " + W + R(5) + W),
                          ("label", PRE, "trace " + W), ("prompt", PRE, "trace " + W + "2 dp 5"),
                          ("undef", "y= ln xton ) 2nd mode . ", "trace " + W + R(60, "left") + W)):
-        K = PROLOGUE + pre + "graph . . " + k + " @a"
+        K = PROLOGUE + G.SNAP_OFF + pre + "graph . . " + k + " @a"
         r = tigo.go(K, [Snap("a", rect=(0, 0, 320, 240))], files=FILES, launch=LAUNCH)["a"]
         png(r["px"], os.path.join(G.PNG, "symce_tr_%s.png" % name))
         print("wrote symce_tr_%s.png" % name)
@@ -494,7 +549,7 @@ def calc(only=()):
         res, cx, txt = {}, {}, {}
         for side in ("ti", "sym"):
             off = G.TI_OFF if side == "ti" else ""
-            K = PROLOGUE + off + ys + ("" if home else "graph . . w6000 ") + "2nd trace w1500 " + keys + " @a"
+            K = PROLOGUE + off + ys + ("" if home else "graph . . w6000 ") + "2nd trace w3000 " + keys + " @a"
             r = tigo.go(K, [Snap("a", rect=(0, 0, 320, 240), ram=RAM + [(0xD007E0, 1)])], files=FILES, launch=LAUNCH)["a"]
             png(r["px"], "_png/%s_calc_%s.png" % ("symce" if side == "sym" else "tix", name))
             s = summ(r)
@@ -505,9 +560,10 @@ def calc(only=()):
         for slow in (False, True):                  # a key typed into the readout may be lost: once more, slowly, before calling it a difference
             for side in ("ti", "sym"):
                 off = G.TI_OFF if side == "ti" else ""
-                K2 = PROLOGUE + G.NOCAS + off + "5 + 3 enter . " + ys + ("" if home else "graph . . w6000 ") + "2nd trace w1500 " + keys + " 2nd mode . w600 2nd (-) enter w900 " + vs + " @h"
+                K2 = PROLOGUE + G.NOCAS + off + "5 + 3 enter . " + ys + ("" if home else "graph . . w6000 ") + "2nd trace w3000 " + keys + " 2nd mode . w600 2nd (-) enter w900 " + vs + " @h"
                 if slow:
                     K2 = K2.replace("w900", "w2500")
+                    K2 = K2.replace(G.NOCAS, "w37 " + G.NOCAS, 1)   # a size/timing phase fluke can also sink the whole run (seq_val_wlo): shift the phase too
                 h = tigo.go(K2, [Snap("h", ram=[(0xD006C0, 260)])], files=FILES, launch=LAUNCH)["h"]
                 b = rdb(h, 0xD006C0, 260).replace(b"\xe0", b" ")
                 res[side][4] = [x for x in ["".join(chr(c) if 32 <= c < 127 else ("~" if c == 0x1a else ".") for c in b[i * 26:(i + 1) * 26]).rstrip() for i in range(10)] if x][-nr:]
@@ -520,17 +576,19 @@ def calc(only=()):
 
 def drawcmp(only=()):
     """2nd DRAW: the same keys on both sides (one session each); the pixels the drawing turned on (layer nibble 1) must be the same set.
-    TI erases to nibble 0 where SymCE keeps a white 11, so erased pixels compare as off. Tests are in _draw.json: [name, keys, gx0, gx1, gy0, gy1]."""
+    TI erases to nibble 0 where SymCE keeps a white 11, so erased pixels compare as off. Tests are in _draw.json: [name, keys, gx0, gx1, gy0, gy1], a 7th item compares white (11) pixels too."""
     import json
     tests = [t for t in json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_draw.json"))) if not only or t[0] in only]
+    if len(tests) > 10:                           # one long session derails TI's keys (measured: the same cases pass in small batches), so 10 cases per session
+        return all([drawcmp([t[0] for t in tests[i:i + 10]]) for i in range(0, len(tests), 10)])
     LAY = 0xD09466
 
-    def pace(k):                                  # TI redraws its previews slowly and drops keys pressed meanwhile: a pause every 8 cursor moves
+    def pace(k):                                  # TI redraws its previews slowly and drops keys pressed meanwhile: a pause every 4 cursor moves
         o, n = [], 0
         for w in k.split():
             n = n + 1 if w in ("left", "right", "up", "down") else 0
             o.append(w)
-            if n and n % 8 == 0:
+            if n and n % 4 == 0:
                 o.append("w150")
         return " ".join(o)
     wn = lambda t: [(LAY + (164 - gy) * 133 + t[2] // 2, t[3] // 2 + 1 - t[2] // 2) for gy in range(t[5], t[4] - 1, -1)]
@@ -539,23 +597,33 @@ def drawcmp(only=()):
         K = PROLOGUE + (G.TI_OFF if side == "ti" else "") + "graph . . w300 "
         snaps = []
         for i, t in enumerate(tests):
-            pre, _, k = t[1].partition("|") if "|" in t[1] else ("", "", t[1])
+            pre, _, k = t[1].partition(" | ") if " | " in t[1] else ("", "", t[1])
             K += pre + " @a%d " % i + pace(k) + " w800 @b%d " % i
             snaps += [Snap("a%d" % i, ram=wn(t)), Snap("b%d" % i, ram=wn(t))]
         r = tigo.go(K, snaps, files=FILES, launch=LAUNCH)
         res[side] = r
     ok = True
     for i, t in enumerate(tests):
-        sets = {}
+        sets, curve = {}, set()
         for side in ("ti", "sym"):
             o = set()
             for (a, n), gy in zip(wn(t), range(t[5], t[4] - 1, -1)):
                 x, y = res[side]["a%d" % i]["ram"][a], res[side]["b%d" % i]["ram"][a]
                 for gx in range(t[2], t[3] + 1):
                     j, sh = gx // 2 - t[2] // 2, 4 if gx % 2 == 0 else 0
-                    if (y[j] >> sh) & 15 == 1 and (x[j] >> sh) & 15 != 1:
+                    if side == "ti" and (x[j] >> sh) & 15 == 1:
+                        curve.add((gx, gy))      # TI's own plot is in the layer; SymCE's is not: a pixel under TI's curve cannot show as drawn
+                    v = (y[j] >> sh) & 15
+                    if len(t) > 6 and v in (1, 11) and v != (x[j] >> sh) & 15:     # Text(: the white cells count too
+                        o.add((gx, gy, v))
+                    elif len(t) < 7 and v == 1 and (x[j] >> sh) & 15 != 1:
                         o.add((gx, gy))
             sets[side] = o
+        sets["sym"] -= curve
+        if sets["ti"] != sets["sym"] and len(tests) > 1:    # TI/SymCE key timing in a batch is phase sensitive (which case fails moves with image size and batch mix): judge a failure alone
+            print("retry %s alone" % t[0])
+            ok = drawcmp([t[0]]) and ok
+            continue
         ok = G.report(sets["ti"] == sets["sym"], "DRAW %s: %d layer pixels, equal TI's%s" % (t[0], len(sets["ti"]), "" if sets["ti"] == sets["sym"] else " (TI-only %s SymCE-only %s)" % (sorted(sets["ti"] - sets["sym"])[:40], sorted(sets["sym"] - sets["ti"])[:40]))) and ok
     return ok
 

@@ -1,10 +1,16 @@
-# SymCE
+# SymCE: a computer algebra system (CAS) for the TI-84 Plus CE
 
 DISCLAIMER: This application was written using Claude code. I have little to no actual coding experience, and this was created as a side project for fun. I cannot guarantee this code works or does as described below. Use at your own risk.
 
 A computer algebra system for the **TI-84 Plus CE** (OS 5.8.4), living
 inside the home screen. Type `2X+2X` and press ENTER: the stock OS says `0`
 (it plugs in X), SymCE says `4X`.
+
+If you are looking for a CAS program for the TI-84 Plus CE, this is one: exact
+algebra, factoring, equation solving, derivatives, integrals and limits, like
+the CAS on a TI-89 or TI-Nspire CX CAS, but on the TI-84 Plus CE you already
+have. It is a flash app, so it works on the calculator itself, with no computer
+needed after install.
 
 ```
 (X+1)^2                 -> X²+2X+1
@@ -21,7 +27,32 @@ MIDPOINT((1,2),(4,7))   -> (5/2,9/2)
   (solve, factor, expand, polynomial tools, complex), Calculus (derivatives,
   integrals, limits, sums, series) and Geometry (distance, midpoint, lines,
   triangle centres, transformations). The same tabs sit in **2nd MATH**.
+- **Step-by-step solutions:** `steps(solve(2X+3=7,X))`, `steps(deriv(X²sin(X),X))`,
+  `steps(factor(X²-5X+6))` show one move per step (2nd MATH, Algebra tab).
 - Anything SymCE can't answer exactly is left to the OS, unchanged.
+
+## Solving equations
+
+`SOLVE` gives exact solutions, square roots included: `SOLVE(X²=2,X)` gives
+`X=-√(2) or X=√(2)`. It also solves inequalities (`SOLVE(X²-2X-3≤0,X)` gives
+`-1≤X≤3`) and systems of equations (`SOLVE({X+Y=3,X-Y=1},{X,Y})` gives
+`X=2 and Y=1`). `CSOLVE` finds complex roots.
+
+## Derivatives, integrals and limits
+
+`DERIV(X³)` gives `3X²`, `INTEGRAL(X²,X,0,3)` gives `9`, and
+`LIMIT(sin(X)/X,X,0)` gives `1`. The Calculus menu also has tangent and
+normal lines, Taylor polynomials, sums, products, arc length, and
+differential equations (`DESOLVE(Y'=2Y,X,Y)` gives `Y=Ce^(2X)`).
+
+## TI-BASIC programs
+
+A TI-BASIC program can use the CAS. Write SymCE commands straight into the
+program, for example `FACTOR(X²-1)→Str1` or `Disp FACTOR(X²-1)`. In the program
+editor, type the command name in capitals with ALPHA, then `(`. The answer is a
+string. `expr("FACTOR(X²-1)")` works too. Your program is never changed: SymCE
+runs a hidden copy of it. A program whose last line is a SymCE command shows
+that answer in place of `Done`.
 
 Full command list, install steps and known limits: [docs/USAGE.md](docs/USAGE.md).
 
@@ -32,10 +63,10 @@ Full command list, install steps and known limits: [docs/USAGE.md](docs/USAGE.md
 2. Send `SYMCE.8xp` and every `SYMCE#.8xv` to the calculator's **Archive**
    (together they no longer fit in RAM).
 3. Run `prgmSYMCE` through an ASM launcher (OS 5.8.4 blocks `Asm(`; AsmHook
-   works). It installs the SymCE flash app, about 230 KB, and needs about
-   twice that in free archive while installing. Later upgrades: APPS → SymCE → 5.
+   works). It installs the SymCE flash app, about 660 KB, and needs about
+   1.1 MB of free archive while installing. Later upgrades: APPS → SymCE → 5.
 4. **APPS → SymCE** opens the settings: `1` CAS on/off, `2` insert or TI cursor, `3` Evo or TI font, `4` the GRAPH key (SymCE's full-screen grapher or TI's own), `5` run `prgmSYMCE` (upgrade with no AsmHook2).
-5. The **GRAPH** key now opens SymCE's own full-screen grapher; CLEAR or 2nd QUIT leaves it for the home screen. It has TRACE, ZOOM, 2nd CALC and 2nd DRAW, in Function, Parametric, Polar and Seq mode, and draws the stat plots; what it leaves to TI is in [docs/USAGE.md](docs/USAGE.md). APPS → SymCE → 4 switches the key back to TI's graph.
+5. The **GRAPH** key now opens SymCE's own full-screen grapher (all 320×240 pixels); CLEAR or 2nd QUIT leaves it for the home screen. It has TRACE, ZOOM, 2nd CALC and 2nd DRAW, in Function, Parametric, Polar and Seq mode, and draws the stat plots; what it leaves to TI is in [docs/USAGE.md](docs/USAGE.md). APPS → SymCE → 4 switches the key back to TI's graph.
 
 ## Build
 

@@ -127,6 +127,7 @@ class Sim:
         self.w8(org + len(code) + 6, tail)
         self.engine_calls = []    # (in, len, out, work, ans, mode) for every engine call
         self.menu_calls = 0       # symce_menu() calls
+        self.steps_calls = 0      # steps_show() calls (menu blob +16, after the answer is drawn)
         self.menu_ret = 0xBADBAD  # what it returns in HL
         self.prog = None          # where prog #'s data is, if it exists
         self.thrown = None        # the error A the hook threw through _JError
@@ -183,7 +184,7 @@ class Sim:
         self.menu_calls += 1
         self.menu_key = self.r8(self.sp + 4)
         self.menu_args = (self.r8(self.sp + 3), self.r8(self.sp + 6))
-        self.a = 0x5A
+        self.a = 0                # menu_key's result: 1 is Graph Ans (hook.c .Lgans)
         self.hl = self.de = self.iy = 0xBADBAD
         self.hl = self.menu_ret
         self.bcset(0xBADBAD)
@@ -292,6 +293,16 @@ class Sim:
         if self.pc == self.menu_at:
             self._menu()
             return True
+        if self.pc == self.menu_at + 16:      # steps_show: C, ix kept, the rest trashed, iy included
+            self.steps_calls += 1
+            self.hl = self.de = self.iy = 0xBADBAD
+            self.bcset(0xBADBAD)
+            self.pc = self.pop()
+            return True
+        if self.pc == self.menu_at + 24:      # err_save: keeps everything, no arguments
+            self.err_saves = getattr(self, "err_saves", 0) + 1
+            self.pc = self.pop()
+            return True
         if self.pc in (CX_MAIN, CX_MAIN + 1):
             self._cxmain()
             return True
@@ -325,6 +336,8 @@ class Sim:
         elif op == 0x73: self.w8(self.hl, self.de)                 # ld (hl),e
         elif op == 0x7A: self.a = (self.de >> 8) & 0xFF            # ld a,d
         elif op == 0x7B: self.a = self.de & 0xFF                   # ld a,e
+        elif op == 0x34: self.w8(self.hl, (self.r8(self.hl) + 1) & 0xFF)   # inc (hl)
+        elif op == 0xBE: self.cp(self.r8(self.hl))                 # cp a,(hl)
         elif op == 0x37: self.fc = True                            # scf
         elif op == 0x57: self.de = (self.de & 0xFF00FF) | self.a << 8  # ld d,a
         elif op == 0x58: self.de = (self.de & 0xFFFF00) | self.b       # ld e,b
@@ -349,6 +362,7 @@ class Sim:
             self.a = (self.a + 1) & 0xFF; self.fz = (self.a == 0)
         elif op == 0x3D:                                           # dec a
             self.a = (self.a - 1) & 0xFF; self.fz = (self.a == 0)
+        elif op == 0x0C: self.c = (self.c + 1) & 0xFF              # inc c
         elif op == 0x2C:                                           # inc l
             # 8-bit: touches only the low byte of HL, never carries into h.
             self.hl = (self.hl & 0xFFFF00) | ((self.hl + 1) & 0xFF)
@@ -362,6 +376,9 @@ class Sim:
             cin = 1 if self.fc else 0
             self.fc = bool(self.a & 0x80)
             self.a = ((self.a << 1) | cin) & 0xFF
+        elif op == 0x0F:                                           # rrca
+            self.fc = bool(self.a & 1)
+            self.a = ((self.a >> 1) | (self.a << 7)) & 0xFF
 
         # ---- logic / compare ----
         elif op == 0xB7: self._logic(self.a)                       # or a,a
@@ -369,6 +386,7 @@ class Sim:
         elif op == 0xAF: self._logic(0)                            # xor a,a
         elif op == 0xE6: self._logic(self.a & self.imm8())         # and a,n
         elif op == 0xEE: self._logic(self.a ^ self.imm8())         # xor a,n
+        elif op == 0xF6: self._logic(self.a | self.imm8())         # or a,n
         elif op == 0xFE: self.cp(self.imm8())                      # cp a,n
         elif op == 0xBF: self.cp(self.a)                           # cp a,a
         elif op == 0xB8: self.cp(self.b)                           # cp a,b
@@ -413,7 +431,15 @@ class Sim:
                 if not self.nest: return False
                 self.nest -= 1
                 self.pc = self.pop()
+        elif op == 0xC8:                                           # ret z
+            if self.fz:
+                if not self.nest: return False
+                self.nest -= 1
+                self.pc = self.pop()
         elif op == 0xC9:                                           # ret
+            if self.org <= self.r24(self.sp) < self.end:           # fhook's farj/.Lcpass: push target + ret = a jump inside the body
+                self.pc = self.pop()
+                return True
             if not self.nest: return False
             self.nest -= 1            # the hook's call back from cxMain returning to it
             self.pc = self.pop()
@@ -500,6 +526,17 @@ class Sim:
                 self.fz = not (self.r8(self.hl) & (1 << ((o2 >> 3) & 7)))
             elif o2 & 0xC7 == 0x47:                                # bit b,a
                 self.fz = not (self.a & (1 << ((o2 >> 3) & 7)))
+            elif o2 < 0x40 and o2 & 7 != 6:                        # rotate/shift r (rlc rrc rl rr sla sra sll srl)
+                v = self._getr8(o2 & 7); k = o2 >> 3; c = int(self.fc)
+                if k == 0: n, co = (v << 1 | v >> 7) & 0xFF, v >> 7
+                elif k == 1: n, co = (v >> 1 | v << 7) & 0xFF, v & 1
+                elif k == 2: n, co = (v << 1 | c) & 0xFF, v >> 7
+                elif k == 3: n, co = (v >> 1 | c << 7) & 0xFF, v & 1
+                elif k == 4: n, co = (v << 1) & 0xFF, v >> 7
+                elif k == 5: n, co = (v >> 1 | v & 0x80), v & 1
+                elif k == 6: n, co = (v << 1 | 1) & 0xFF, v >> 7
+                else: n, co = v >> 1, v & 1
+                self._setr8(o2 & 7, n); self.fc = bool(co); self.fz = (n == 0)
             elif o2 in (0x19, 0x39):                               # rr c / srl c
                 v = self.c >> 1 | (0x80 if o2 == 0x19 and self.fc else 0)
                 self.fc = bool(self.c & 1); self.c = v; self.fz = (v == 0)
@@ -530,10 +567,32 @@ class Sim:
                     self.hl = (self.hl + 1) & 0xFFFFFF
                     self.de = (self.de + 1) & 0xFFFFFF
                 self.bcset(0)
+            elif o2 == 0xB1:                                       # cpir: Z = found
+                self.fz = False
+                while True:
+                    m = self.r8(self.hl)
+                    self.hl = (self.hl + 1) & 0xFFFFFF
+                    self.bcset((self.bc() - 1) & 0xFFFFFF)
+                    self.fz = (self.a == m)
+                    if self.fz or self.bc() == 0: break
             else: raise Trap("unimplemented ED %02X at %06X" % (o2, self.pc - 2))
+        elif 0x40 <= op <= 0x7F and op != 0x76 and (op & 7) != 6 and (op >> 3 & 7) != 6:
+            self._setr8(op >> 3 & 7, self._getr8(op & 7))              # ld r,r' (the rest of the block)
         else:
             raise Trap("unimplemented opcode %02X at %06X" % (op, self.pc - 1))
         return True
+
+    def _getr8(self, r):
+        return (self.b, self.c, self.de >> 8 & 0xFF, self.de & 0xFF, self.hl >> 8 & 0xFF, self.hl & 0xFF, 0, self.a)[r]
+
+    def _setr8(self, r, v):
+        if r == 0: self.b = v
+        elif r == 1: self.c = v
+        elif r == 2: self.de = (self.de & 0xFF00FF) | v << 8
+        elif r == 3: self.de = (self.de & 0xFFFF00) | v
+        elif r == 4: self.hl = (self.hl & 0xFF00FF) | v << 8
+        elif r == 5: self.hl = (self.hl & 0xFFFF00) | v
+        else: self.a = v
 
     def run(self, limit=400000):
         while self.step():
@@ -548,11 +607,16 @@ def load_hook(bin_path, xp_path):
 
     The app carries hook.bin verbatim (it is position independent, so it has no
     relocation entries), so the body must appear unchanged in the file that
-    carries it: SYMCE1.8xv, the first part of the app image."""
+    carries it: one of the parts SYMCE1.8xv, SYMCE2.8xv .. (the shims sit past the
+    first part once the app is bigger than one variable)."""
     body = open(bin_path, 'rb').read()
     if not body or body[0] != 0x83:
         raise SystemExit("hook body missing its 0x83 magic byte")
-    if body not in open(xp_path, 'rb').read():
+    import glob
+    parts = glob.glob(os.path.join(os.path.dirname(xp_path), 'SYMCE?.8xv')) or [xp_path]
+    # the parts are ZX0-packed now; the image they unpack to is obj/SYMCE.img
+    parts += glob.glob(os.path.join(os.path.dirname(xp_path), '..', 'obj', 'SYMCE.img'))
+    if not any(body in open(f, 'rb').read() for f in parts):
         raise SystemExit("%s does not carry %s -- run make" % (xp_path, bin_path))
     return body
 

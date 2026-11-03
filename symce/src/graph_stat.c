@@ -131,7 +131,7 @@ static void shist_draw(struct gw *w, uint32_t rec)
     uint8_t t[9], base[9], u[9];
     unsigned nb = shist(rec, 1);
     symce_dirty();                                  /* the bin counts live in plotSScreen */
-    int gy0 = sgrid((const uint8_t *)"\0\0\0\0\0\0\0\0\0", ADDR_YMIN, ADDR_DY), py0 = fdiv((164 - gy0) * 218 + 82, 164);
+    int gy0 = sgrid((const uint8_t *)"\0\0\0\0\0\0\0\0\0", ADDR_YMIN, ADDR_DY), py0 = fdiv((164 - gy0) * PH + 82, 164);
     pseg(w, 0, py0, 318, py0);
     for (unsigned b = 0; b < nb; b++) {
         int xa, xb, gt, pt;
@@ -147,7 +147,7 @@ static void shist_draw(struct gw *w, uint32_t rec)
         xb = sgrid(base, ADDR_XMIN, ADDR_DX);
         ireal(u, SHB[b]);
         gt = sgrid(u, ADDR_YMIN, ADDR_DY);
-        pt = fdiv((164 - gt) * 218 + 82, 164);
+        pt = fdiv((164 - gt) * PH + 82, 164);
         xa = fdiv(xa * 318 + 132, 264);
         xb = fdiv(xb * 318 + 132, 264);
         pseg(w, xa, py0, xa, pt);
@@ -308,7 +308,7 @@ static void sbmed(const struct sbc *c, unsigned a, unsigned len, uint8_t *out)
 }
 
 #define SBPX(g) fdiv((g) * 318 + 132, 264)
-#define SBPY(g) fdiv((164 - (g)) * 218 + 82, 164)
+#define SBPY(g) fdiv((164 - (g)) * PH + 82, 164)
 
 /* a vertical line at grid x g from grid y y0 to y1: none if g is off the grid (TI draws no pen from there) */
 static void sbv(struct gw *w, int g, int y0, int y1)
@@ -485,7 +485,7 @@ static void splots(struct gw *w)
         for (int pass = 0; pass < 2; pass++)     /* the line first for xyLine, then the marks on it */
             for (unsigned i = 0; i < cnt; i++) {
                 int gx = sgrid(x + 9 * i, ADDR_XMIN, ADDR_DX), gy = sgrid(y + 9 * i, ADDR_YMIN, ADDR_DY);
-                int px = fdiv(gx * 318 + 132, 264), py = fdiv((164 - gy) * 218 + 82, 164);
+                int px = fdiv(gx * 318 + 132, 264), py = fdiv((164 - gy) * PH + 82, 164);
                 if (pass == 0 && (OSB(r) & 15) == 1 && i)
                     pseg(w, ox, oy, px, py);
                 if (pass && gx >= 0 && gx <= 264 && gy >= 0 && gy <= 164)      /* TI draws no mark for a point off the grid */

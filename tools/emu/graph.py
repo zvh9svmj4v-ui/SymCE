@@ -4,7 +4,7 @@
                      [fall] [on] [entry] [exitbar] [trace] [stat] [time]     # default: all
 
   shots   colour PNGs of the whole LCD to _png/fg_*.png
-  pixels  columns of sin(X) and X^2/5 sit within +-1 row of the 319x219 mapping;
+  pixels  columns of sin(X) and X^2/5 sit within +-1 row of the 319x240 mapping;
           the border colour; the + and 0 keys do nothing
   format  axes colour and ticks, GridDot / GridLine, thin vs normal line, palette
           colours 8 and 15, Detect Asymptotes on / off (tan(X), against TI's)
@@ -21,7 +21,7 @@
   trace   free cursor, TRACE, number entry, pan, QuickZoom against TI (trace.py)
   stat    Scatter / xyLine plots, marks, colours, clipping, ZoomStat against TI (statplot.py); the rest fall to TI
   time    GRAPH to fully drawn, for the six functions timed in the OS graph
-          (docs/TI84CE-KNOWLEDGE.md 11b): a CRC of rows 0..219 every few ms until
+          (docs/TI84CE-KNOWLEDGE.md 11b): a CRC of rows 0..239 every few ms until
           it stops changing
 
 The Y= entries go in with the SymCE app armed (as the OS graph would read them),
@@ -38,7 +38,7 @@ PNG = os.path.join(HERE, "_png")
 BLUE, BLACK, RED = 0x001F, 0x0000, 0xF800
 PAL = {1: 0x001F, 2: 0xF800, 3: 0x0000, 4: 0xF81F, 5: 0x04E0, 6: 0xFC64, 7: 0xB100, 8: 0x0010,
        9: 0x049F, 10: 0xFFE0, 11: 0xFFFF, 12: 0xE71C, 13: 0xC618, 14: 0x8C51, 15: 0x52AA}
-PW, PH = 319, 219
+PW, PH = 319, 240
 GRIDC, AXESC, STYLE = 0xD024F1, 0xD024F2, 0xD024BF
 # name, Y= keys: one string per equation
 FUNCS = {
@@ -52,6 +52,7 @@ TIMED = {"(none)": [], "X": ["xton"], "sin(X)": ["sin xton )"], "X^2": ["xton ^2
          "sin(X)/X+cos(3X)": ["sin xton ) / xton + cos 3 xton )"],
          "sqrt(X)": ["2nd ^2 xton )"], "sin,cos,X^2/5": FUNCS["three"]}
 TI_OFF = SETTINGS + "4 . clear . 2nd mode . "                        # GRAPH goes to TI's own graph
+SNAP_OFF = SETTINGS + "6 . clear . 2nd mode . "                    # TRACE does not snap to zeros etc: the TI-parity tests step the grid
 NOCAS = SETTINGS + "1 . clear . "                         # the CAS off: the home screen shows plain answers
 
 
@@ -149,7 +150,7 @@ def xat(c):
 
 
 def rowof(f):
-    return round((10 - f) / 20 * 218)
+    return round((10 - f) / 20 * 239)
 
 
 def curve_ok(px, f, colour, label, cols=range(100, 231, 13), skip=2.5):
@@ -186,16 +187,29 @@ def pixels(shot):
             ("X^2/5", shot["fg_three"], lambda x: x * x / 5, BLACK, range(100, 231, 13))):
         ok = curve_ok(px, f, colour, label, cols) and ok
     px = shot["fg_sin"]
-    ok = report(px[(PW, 5)] == 0xFFFF and px[(5, PH + 3)] == 0xFFFF and px[(PW, PH + 20)] == 0xFFFF,
-                "column 319 and the bar rows 219..239 white like the plot") and ok
+    ok = report(px[(PW, 5)] == 0xFFFF and px[(PW, PH - 1)] == 0xFFFF, "column 319 white like the plot") and ok
+    ok = report(all(px[(159, y)] == BLACK for y in (220, 230, 239)) and sum(px[(x, 239)] != 0xFFFF for x in range(PW)) >= 9,
+                "rows 220..239 are the plot: the y axis (and its foot tick, 9 px measured) run to the bottom edge") and ok
     ok = report(px[(250, 30)] == 0xFFFF and px[(10, 200)] == 0xFFFF, "plot background white") and ok
     ok = report(shot["fg_keys"] == shot["fg_sin"], "+ and 0 change nothing") and ok
+    return foot() and ok
+
+
+def foot():
+    """After TRACE then CLEAR, and after TRACE, a typed number and CLEAR twice, the rows under the bar and the X= box hold the plot again:
+    the whole screen equals the plain graph."""
+    ok = True
+    plain = grab(keys_for(["xton ^2 / 5"]))
+    for label, k in (("TRACE, CLEAR", "trace w700 clear w700 "), ("TRACE, 5, CLEAR, CLEAR", "trace w700 5 w700 clear w700 clear w700 ")):
+        after = grab(keys_for(["xton ^2 / 5"], k))
+        bad = sum(after[xy] != plain[xy] for xy in plain)
+        ok = report(bad == 0, "%s: the foot of the plot is back (%d px differ from the plain graph)" % (label, bad)) and ok
     return ok
 
 
 def axis_ok(px, ram):
     ac = PAL.get(ram["axes"], 0)
-    col, row = 159, 109                                   # value 0 of the -10..10 window
+    col, row = 159, 120                                   # value 0 of the -10..10 window
     ok = report(px.get((col, 30)) == ac and px.get((60, row)) == ac, "axes drawn in the FORMAT axes colour %04X" % ac)
     # ticks at every Xscl (1): x = 2 is column round(12 * 318 / 20) = 191, +-4 rows
     tk = [px.get((191, row + d)) == ac for d in (-4, 4)] + [px.get((col + d, rowof(2))) == ac for d in (-4, 4)]
@@ -368,7 +382,8 @@ def hand():
         state(TI_OFF + draw + k + " . ")
         b = state.cx
         # menu keys open over home (0x40) where TI opens them over the graph (0x44)
-        good = a == b or (a == 0x40 and b == 0x44)
+        # 2nd TABLE: SymCE draws its own table (graph_table.c) and leaves cxCurApp alone, TI opens cxTable 4A
+        good = a == b or (a == 0x40 and b == 0x44) or (name == "2nd TABLE" and a == 0x45 and b == 0x4A)
         ok = report(good, "%s from the graph: SymCE cxCurApp %02X, TI %02X" % (name, a, b)) and ok
     return ok
 
@@ -390,6 +405,15 @@ def fall():
     ok = report(state.cx in (0x40, 0x45), "Parametric mode graph is ours (cxCurApp %02X)" % state.cx) and ok
     state(y + "graph . . ")
     ok = report(state.cx in (0x40, 0x45), "plain Function graph stays ours (cxCurApp %02X; 45 on the first, X and Y made under MODE)" % state.cx) and ok
+    # An empty window (Xmin >= Xmax, Ymin >= Ymax, ZoomFit of a constant) is TI's ERR:WINDOW RANGE screen,
+    # pixel for pixel, from every way in: GRAPH, TRACE, ZOOM In, 2nd CALC, 2nd TABLE, and then Quit.
+    sq = "y= xton ^ 2 2nd mode . "
+    for name, pre, tail in (("Ymin=Ymax", sq + "window down down down 5 enter 5 enter 2nd mode . ", ["graph . . ", "trace . . ", "zoom 2 w800 ", "2nd trace w800 ", "2nd graph . . ", "graph . . 1 . . "]),
+                            ("Xmin>Xmax", sq + "window 5 enter 3 enter 2nd mode . ", ["graph . . ", "trace . . ", "zoom 2 w800 ", "2nd trace w800 ", "2nd graph . . ", "graph . . 1 . . "]),
+                            ("ZoomFit of Y1=5", "y= 5 2nd mode . graph . . ", ["zoom 0 w7000 ", "zoom 0 w7000 1 . . "])):
+        for t in tail:
+            a, b = grab(pre + t), grab(TI_OFF + pre + t)
+            ok = report(a == b, "%s, %s: TI's ERR:WINDOW RANGE screen (%s)" % (name, t.strip(" ."), "same pixels" if a == b else "DIFFERENT")) and ok
     return ok
 
 
@@ -450,9 +474,9 @@ def keyseq(keys):
 
 
 def draw_ms(funcs):
-    """ms from the GRAPH key to the last change of rows 0..219 (to the sample period)."""
+    """ms from the GRAPH key to the last change of rows 0..239 (to the sample period)."""
     pre = PROLOGUE + "y= " + " down ".join(funcs) + " 2nd mode . "
-    addr, size = vram.VRAM, 220 * 640
+    addr, size = vram.VRAM, 240 * 640
     period, n = 20, 50
     while True:
         seq = ["delay|1500"] + keyseq(pre) + ["key|graph"]

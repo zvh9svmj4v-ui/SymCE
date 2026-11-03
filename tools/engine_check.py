@@ -23,8 +23,9 @@ they end, as if the entry had a decimal point.
 Ans stands for the engine's own last answer. An entry with Ans must answer
 exactly what the same entry with (answer) in its place does, and Ans alone
 must give the answer back unchanged. The OS's own Ans is never set when the
-engine answers, so an entry with the engine's Ans is never refused: past what
-the engine can do it is an error screen.
+engine answers with a symbolic result, so an entry with such an Ans is never
+refused: past what the engine can do it is an error screen. A numeric Ans is
+synced into the OS's, so the entry may pass to the OS.
 
 The function commands (TOLN .. TCOLLECT, section 7) are checked by value, not
 bytes: sympy evaluates the answer and the entry at random points, the answer
@@ -36,7 +37,7 @@ whose answer would have fit are counted, with a few shown, because each one
 is a limit (term count, nesting, an intermediate over 999999) and should be
 one on purpose.
 """
-import random, subprocess, sys, os
+import random, re, subprocess, sys, os
 from fractions import Fraction
 from math import gcd, lcm
 import sympy
@@ -49,6 +50,7 @@ LIM, MAXEXP, NV, WIDTH, MAXLEN, MAXOUT = 999999, 15, 6, 26, 64, 64
 ADD, SUB, MUL, DIV, POW, NEG, ANS = 0x70, 0x71, 0x82, 0x83, 0xF0, 0xB0, 0x72
 LP, RP, SQR, CUBE, INV, DOT, SQRT = 0x10, 0x11, 0x0D, 0x0F, 0x0C, 0x3A, 0xBC
 FRAC = [0xEF, 0x2E]         # the n/d bar as the OS flattens a MathPrint fraction
+COMMA = 0x2B                 # a function argument's comma
 LB, RB, LC, I_ = 0x08, 0x09, 0x2C, 0xD7   # answers only: { } and the glyphs , and i
 TXT = {ADD: '+', SUB: '-', MUL: '*', DIV: '/', POW: '^', NEG: '~', LP: '(',
        RP: ')', SQR: '²', CUBE: '³', INV: '⁻¹', 0x5B: 'θ', 0x3A: '.', SQRT: '√('}
@@ -102,6 +104,12 @@ def structured(rnd):
 def show(tokens):
     return ''.join(TXT.get(b, chr(b) if 0x20 < b < 0x7F else '<%02x>' % b)
                    for b in tokens).replace('<ef>.', '⁄')
+
+
+def numeric(a):
+    """engine.c scalar(): a number the OS holds as its Ans too (SymCE syncs it), so an
+    entry with it that the engine cannot do is left to the OS, not refused."""
+    return not any(isvar(b) or b in (0x6A, 0x3C, 0x08, 0x2C) for b in a)
 
 
 def isvar(b):
@@ -744,15 +752,18 @@ def commands(rnd, n, ask, eng, report):
     def call(name, t, mp, var=None, ok=()):
         """t: the argument, or a list of them; ok: errors that may be right"""
         t = bytes([COMMA]).join(t) if isinstance(t, list) else t
-        c = bytes(name.encode() + bytes([LP]) + t + (bytes([COMMA, var]) if var else b'') + bytes([RP]))
+        c = bytes(cn(name) + bytes([LP]) + t + (bytes([COMMA, var]) if var else b'') + bytes([RP]))
         o = ask(eng, c, b'', mp)
         if isinstance(o, str) and o not in LIMITS + ok and not (name == 'SOLVE' and o in ('NO SOLUTION', 'SYNTAX')):
             report(name, c, o.encode(), None)
-        elif isinstance(o, bytes) and not mp and len(o) + o.count(SQRT) + 3 * o.count(OR) > WIDTH:
-            report(name + ' W', c, o, None)
         elif isinstance(o, bytes):
             got[name] = got.get(name, 0) + 1
         return c, o
+
+    def differs(o, t, mp):
+        """o is not the answer SymCE gives the plain expression t (wide plain answers are left to the OS: PASS)"""
+        a = ask(eng, t, b'', mp)
+        return o != a and not (a is None and len(o) + o.count(SQRT) + 3 * o.count(OR) > WIDTH)
 
     def items(o):
         """A list answer's items as values, or None"""
@@ -829,7 +840,7 @@ def commands(rnd, n, ask, eng, report):
             report('POLYDEGREE', c, o, str(P.degree()).encode())
         # COMDENOM is EXPAND; LEFT and RIGHT are each side's own answer
         c, o = call('COMDENOM', t, mp)
-        if isinstance(o, bytes) and o != ask(eng, t, b'', mp):
+        if isinstance(o, bytes) and differs(o, t, mp):
             report('COMDENOM', c, o, ask(eng, t, b'', mp))
         if q != 1:
             tq = fmt(q, len(q.free_symbols))
@@ -837,7 +848,7 @@ def commands(rnd, n, ask, eng, report):
                 return
             for name, side in (('LEFT', t), ('RIGHT', tq)):
                 c, o = call(name, t + bytes([EQ]) + tq, mp)
-                if isinstance(o, bytes) and o != ask(eng, side, b'', mp):
+                if isinstance(o, bytes) and differs(o, side, mp):
                     report(name, c, o, ask(eng, side, b'', mp))
             # POLYQUOTIENT and POLYREMAINDER in X, other variables as numbers
             dom = sympy.QQ[Y] if p.has(Y) or q.has(Y) else sympy.QQ
@@ -887,7 +898,7 @@ def commands(rnd, n, ask, eng, report):
         for mp in (0, 1):
             # EXPAND is the answer SymCE gives the expression alone
             c, o = call('EXPAND', t, mp)
-            if isinstance(o, bytes) and o != ask(eng, t, b'', mp):
+            if isinstance(o, bytes) and differs(o, t, mp):
                 report('EXPAND', c, o, ask(eng, t, b'', mp))
             # FACTOR: the same value, every factor over Q found
             if tq is not None and len(tq) <= MAXLEN - 10:
@@ -1013,25 +1024,42 @@ SIN, COS, TAN, LN, LOG, EXP, EXT, BB, ABS = 0xC2, 0xC4, 0xC6, 0xBE, 0xC0, 0xBF, 
 LCOS = bytes([BB, 0xB2, BB, 0xBF, BB, 0xC3, LP])      # an answer's cos(: the letters c o s
 E_ = bytes([BB, 0x31])
 # readable text <-> tokens, for the exact cases and for reports
-FIN = [('logBASE(', b'\xef\x34'), ('sin(', b'\xc2'), ('cos(', b'\xc4'), ('tan(', b'\xc6'),
+FIN = [('asin(', b'\xc3'), ('acos(', b'\xc5'), ('atan(', b'\xc7'), ('π', b'\xac'), ('logBASE(', b'\xef\x34'), ('sin(', b'\xc2'), ('cos(', b'\xc4'), ('tan(', b'\xc6'),
        ('ln(', b'\xbe'), ('log(', b'\xc0'), ('e^(', b'\xbf'), ('e', E_), ('(', b'\x10'), (')', b'\x11'),
        (',', b'\x2b'), ('²', b'\x0d'), ('³', b'\x0f'), ('^', b'\xf0'), ('-', b'\x71'), ('~', b'\xb0'),
        ('+', b'\x70'), ('*', b'\x82'), ('/', b'\x83'), ('θ', b'\x5b'), ('√(', b'\xbc'), ('=', b'\x6a'),
-       ('abs(', b'\xb2'), ('ᴇ', b'\x3b')]      # ᴇ: the E of 1ᴇ99, infinity (LIMIT)
+       ('abs(', b'\xb2'), ('ᴇ', b'\x3b'), ("'", b'\xae'), (' and ', b'\x40'),
+       ('[', b'\x06'), (']', b'\x07'), ('.', b'\x3a'), ('!', b'\x2d')]      # ᴇ: the E of 1ᴇ99, infinity (LIMIT)
 # an answer's tokens: (text, python for sympy)
-FOUT = [(LCOS, 'cos(', 'cos('), (b'\xef\x34', 'logBASE(', 'logb('), (E_, 'e', 'E'),
+FOUT = [(b'\xc3', 'asin(', 'asin('), (b'\xc5', 'acos(', 'acos('), (b'\xc7', 'atan(', 'atan('), (b'\xac', 'π', 'pi'),
+        (LCOS, 'cos(', 'cos('), (b'\xef\x34', 'logBASE(', 'logb('), (E_, 'e', 'E'),
         (b'\xb2', 'abs(', 'Abs('),
         (b'\xc2', 'sin(', 'sin('), (b'\xc6', 'tan(', 'tan('), (b'\xbe', 'ln(', 'log('),
         (b'\xc0', 'log(', 'log10('), (b'\xbf', 'e^(', 'exp('), (b'\xbc', '√(', 'sqrt('),
         (b'\x10', '(', '('), (b'\x11', ')', ')'), (b'\x2c', ',', ','), (b'\x0d', '²', '**2'),
         (b'\x0f', '³', '**3'), (b'\xf0', '^', '**'), (b'\x71', '-', '-'), (b'\xb0', '-', '-'),
-        (b'\x70', '+', '+'), (b'\x82', '*', '*'), (b'\x83', '/', '/'), (b'\xd7', 'i', 'I'), (b'\x3a', '.', '.')]
+        (b'\x70', '+', '+'), (b'\x82', '*', '*'), (b'\x83', '/', '/'), (b'\xd7', 'i', 'I'), (b'\x3a', '.', '.'),
+        (b'\x06', '[', '['), (b'\x07', ']', ']')]
+
+
+def cn(name):
+    """A command's name as the menus type it: lowercase tokens (BB B0 a .. j, BB BB k .. z)."""
+    return b''.join(bytes([0xBB, 0xB0 + ord(c) - 65 + (c >= 'K')]) for c in name)
+
+
+CMDNAMES = open(os.path.join(ROOT, 'symce/src/engine.c')).read().split('static const char cmds[] =')[1].split(';')[0]
+CMDNAMES = set(re.findall(r'[A-Z]+', CMDNAMES.replace('\\0', ' ')))
 
 
 def ti(s):
-    """readable text -> entry tokens: 'TEXPAND(sin(2X))'"""
+    """readable text -> entry tokens: 'TEXPAND(sin(2X))'; a command's name in capitals
+    followed by '(' becomes its lowercase tokens"""
     o = b''
     while s:
+        m = re.match(r'([A-Z]+)\(', s)
+        if m and m.group(1) in CMDNAMES:
+            o, s = o + cn(m.group(1)), s[len(m.group(1)):]
+            continue
         for k, v in FIN:
             if s.startswith(k):
                 o, s = o + v, s[len(k):]
@@ -1091,34 +1119,56 @@ def fcols(o, mp):
     """engine.c's width() for an answer with functions: Classic counts each
     name (measured: right-aligned by it), MathPrint the same names and every
     parenthesis, each A/B stacked."""
-    head = {BB: 1, EXT: 8, LN: 3, EXP: 3, LOG: 4, SIN: 4, TAN: 4}
+    head = {BB: 1, EXT: 8, LN: 3, EXP: 3, LOG: 4, SIN: 4, TAN: 4, 0xC3: 6, 0xC5: 6, 0xC7: 6}
     w, k = 0, 0
     if not mp:
         while k < len(o):
             w += head.get(o[k], 2 if o[k] == SQRT else 4 if o[k] in (OR, ABS) else 1)
             k += 2 if o[k] in (BB, EXT) else 1
         return w
-    side = top = over = depth = 0
+    hd = {**head, EXP: 1}
+    def group(k):
+        """columns of what follows an opener, to its ')': a term is the sum of its parts,
+        or with a '/' (a stacked fraction, measured: 2sin(X/2) 83 px) its widest part; each
+        sign or comma is a column; a nested group is its name, its inside and the ')'"""
+        parts, total = [0], 0
+        while k < len(o) and o[k] != RP:
+            c = o[k]
+            if c in head and c != BB or c in (LP, SQRT, ABS):
+                inner, nk = group(k + 1 + (c == EXT))
+                parts[-1] += hd.get(c, 1) + inner + 1
+                k = nk
+                continue
+            if c == DIV:
+                parts.append(0)
+            elif c in (ADD, SUB, NEG, COMMA):
+                total += (max(parts) if len(parts) > 1 else parts[0]) + 1
+                parts = [0]
+            else:
+                parts[-1] += c != POW
+            k += 1 + (c == BB)
+        return total + (max(parts) if len(parts) > 1 else parts[0]), k + 1
+
+    side = top = over = ck = pn = 0
     while k <= len(o):
         c = o[k] if k < len(o) else ADD
-        if c in head:
-            side += head[c]
-            depth += c != BB
-            k += c in (BB, EXT)
-        elif c in (LP, SQRT, ABS):
-            depth += 1
+        if c in head and c != BB or c in (LP, SQRT, ABS):
+            inner, k = group(k + 1 + (c == EXT))
+            side += hd.get(c, 1) + inner + 1
+            continue
+        if c == BB:
             side += 1
-        elif c == RP:
-            depth -= 1
-            side += 1
+            k += 1
         elif c == DIV:
             top, side, over = side, 0, 1
-        elif depth or c not in (ADD, SUB, NEG, EQ, OR, LC, LB, RB):
+            pn = o[ck] == LP and o[k - 1] == RP
+        elif c not in (ADD, SUB, NEG, EQ, OR, LC, LB, RB, 6, 7):
             side += c != POW
         else:
-            w += max(top, side) if over else side
-            w += over + (0 if k == len(o) else 4 if c == OR else 1)
+            u = (max(top, side) if over else side) + over
+            w += (u * 3 // 4 if over and pn and not w and k == len(o) else u) + (0 if k == len(o) else 4 if c == OR else 1)
             top = side = over = 0
+            ck = k + 1
         k += 1
     return w
 
@@ -1332,7 +1382,7 @@ def functions(rnd, n, eng, report):
             if cmd == 'TOLOGBASE':
                 base = rnd.choice([b'2', b'3', b'5', b'10', E_])
                 t = t + [COMMA] + list(base)
-        c = cmd.encode() + bytes([LP] + t + [RP])
+        c = cn(cmd) + bytes([LP] + t + [RP])
         if len(c) > MAXLEN:
             continue
         for pre in ('', 'M') + (('G',) if i % 5 == 0 else ()):
@@ -1349,7 +1399,7 @@ def functions(rnd, n, eng, report):
                 got[str(o)] = got.get(str(o), 0) + 1
             else:
                 try:
-                    ok = same(o, e) and form(cmd, o, base) and fcols(o, pre == 'M') <= WIDTH
+                    ok = same(o, e) and form(cmd, o, base)
                 except (Syntax, TypeError, ValueError, SyntaxError, sympy.SympifyError):
                     ok = False
                 if not ok:
@@ -1376,7 +1426,7 @@ def functions(rnd, n, eng, report):
             ('TOLN(log(X))', '', 'ln(X)/ln(10)'),
             ('TOLN(logBASE(X,3))', '', 'ln(X)/ln(3)'),
             ('TOLOGBASE(logBASE(10,3)-logBASE(5,5),5)', 'M', 'logBASE(10,5)/logBASE(3,5)-1'),
-            ('TOLOGBASE(logBASE(10,3)-logBASE(5,5),5)', '', 'TOO WIDE'),     # 28 columns
+            ('TOLOGBASE(logBASE(10,3)-logBASE(5,5),5)', '', 'logBASE(10,5)/logBASE(3,5)-1'),     # 28 columns: the answer view
             ('TOLOGBASE(ln(X),5)', '', 'logBASE(X,5)/logBASE(e,5)'),
             ('TOLOGBASE(ln(X))', '', 'ARGUMENT'),
             ('TOLOGBASE(ln(X),1)', '', 'DOMAIN'),
@@ -1544,7 +1594,7 @@ def calculus(rnd, n, eng, report):
                 t += [COMMA, 0x58, COMMA] + h
                 want = (e.subs(X, X + hv) - e.subs(X, X - hv)) / (2 * hv)
                 tr = False
-        c = cmd.encode() + bytes([LP] + t + [RP])
+        c = cn(cmd) + bytes([LP] + t + [RP])
         if len(c) > MAXLEN:
             continue
         radian = None
@@ -1563,8 +1613,7 @@ def calculus(rnd, n, eng, report):
                 continue
             try:
                 named = any(b in (BB, EXT) or LN <= b <= TAN for b in o)   # else engine.c's width()
-                ok = (want is not None and same(o, want) and form(cmd, o, order)
-                      and (fcols if named else width)(o, pre == 'M') <= WIDTH)
+                ok = (want is not None and same(o, want) and form(cmd, o, order))
             except (Syntax, TypeError, ValueError, SyntaxError, sympy.SympifyError):
                 ok = False
             if not ok:
@@ -1597,6 +1646,8 @@ def calculus(rnd, n, eng, report):
             ('TANGENTLINE(e^(X),X,0)', '', 'X+1'),
             ('TANGENTLINE(ln(X),X,~1)', '', 'DOMAIN'),
             ('NORMALLINE(X²,X,1)', '', '3/2-X/2'),
+            ('NORMALLINE(-X³+2log(X),X,1/2)', 'M', 'SYMCE LIMIT'),
+            ('NORMALLINE(-X³+2log(X),X,1/2)', '', 'SYMCE LIMIT'),
             ('NORMALLINE(X²,X,0)', '', 'DIVIDE BY 0'),
             ('TAYLOR(e^(X),X,3)', '', 'X³/6+X²/2+X+1'),
             ('TAYLOR(sin(X),X,5)', '', 'X^5/120-X³/6+X'),
@@ -1613,6 +1664,14 @@ def calculus(rnd, n, eng, report):
             ('INTEGRAL(Xsin(X),X)', '', 'sin(X)-Xcos(X)'),
             ('INTEGRAL(ln(X),X)', '', 'Xln(X)-X'),
             ('INTEGRAL(sin(X)²,X)', '', 'X/2-sin(2X)/4'),
+            ('INTEGRAL(X/(X²+1),X)', '', 'ln(X²+1)/2'),
+            ('INTEGRAL(X²/(X³+1),X)', '', 'ln(abs(X³+1))/3'),
+            ('INTEGRAL(Xsin(X²),X)', '', '-cos(X²)/2'),
+            ('INTEGRAL(Xe^(X²),X)', '', 'e^(X²)/2'),
+            ('INTEGRAL(sin(X)e^(cos(X)),X)', '', '-e^(cos(X))'),
+            ('INTEGRAL(ln(X)/X,X)', '', 'ln(X)²/2'),
+            ('INTEGRAL(2^X,X)', '', '2^X/ln(2)'),
+            ('INTEGRAL(X^(1/3),X)', '', '3X^(4/3)/4'),
             ('INTEGRAL(X²e^(2X),X)', 'M', 'X²e^(2X)/2-Xe^(2X)/2+e^(2X)/4'),
             ('INTEGRAL(1/(X²-1),X)', 'M', 'ln(abs(X-1))/2-ln(abs(X+1))/2'),
             ('INTEGRAL(1/(X(X+1)²),X)', 'M', 'ln(abs(X))-ln(abs(X+1))+1/(X+1)'),
@@ -1621,7 +1680,25 @@ def calculus(rnd, n, eng, report):
             ('INTEGRAL(sin(X),X,0,1)', '', '1-cos(1)'),
             ('INTEGRAL(1/X,X,~1,1)', '', 'DOMAIN'),
             ('INTEGRAL(ln(X),X,0,1)', '', 'SYMCE LIMIT'),       # improper
-            ('INTEGRAL(1/(X²+1),X)', '', 'SYMCE LIMIT'),        # arctan
+            ('INTEGRAL(sin(X),X,0,π)', '', '2'),
+            ('INTEGRAL(cos(X),X,0,π/2)', '', '1'),
+            ('INTEGRAL(cos(X),X,0,π/3)', '', '√(3)/2'),
+            ('INTEGRAL(1/X,X,1,e)', '', '1'),
+            ('INTEGRAL(1/X,X,1,e²)', '', '2'),
+            ('INTEGRAL(1/X,X,1,π)', '', 'ln(π)'),
+            ('INTEGRAL(sin(X)²,X,0,π)', '', 'π/2'),
+            ('INTEGRAL(sin(X)³,X,0,π)', '', '4/3'),
+            ('INTEGRAL(sin(X)cos(X),X,0,π/2)', '', '1/2'),
+            ('INTEGRAL(1/(X²+1),X,0,1)', '', 'π/4'),
+            ('INTEGRAL(1/(X²+1),X,0,√(3))', '', 'π/3'),
+            ('INTEGRAL(1/(X²+1),X)', '', 'atan(X)'),
+            ('INTEGRAL(1/(X²+4),X)', '', 'atan(X/2)/2'),
+            ('INTEGRAL(1/(X²+2X+2),X)', '', 'atan(X+1)'),
+            ('INTEGRAL((X+1)/(X²+1),X)', '', 'ln(X²+1)/2+atan(X)'),
+            ('INTEGRAL(X²/(X²+1),X)', '', 'X-atan(X)'),
+            ('INTEGRAL(1/(X(X²+1)),X)', '', 'ln(abs(X²))/2-ln(X²+1)/2'),
+            ('INTEGRAL(1/√(1-X²),X)', '', 'asin(X)'),
+            ('INTEGRAL(1/√(4-X²),X)', '', 'asin(X/2)'),
             ('INTEGRAL(sin(X),X)', 'G', 'MODE'),
             ('LIMIT(sin(X)/X,X,0)', '', '1'),
             ('LIMIT((1-cos(X))/X²,X,0)', '', '1/2'),
@@ -1632,7 +1709,24 @@ def calculus(rnd, n, eng, report):
             ('LIMIT(1/X²,X,0)', '', '+INFINITY'),
             ('LIMIT((2X²+1)/(3X²-X),X,1ᴇ99)', '', '2/3'),
             ('LIMIT(X³/(X+1),X,~1ᴇ99)', '', '+INFINITY'),
-            ('LIMIT(sin(X),X,1ᴇ99)', '', 'SYMCE LIMIT'),
+            ('LIMIT(sin(X),X,1ᴇ99)', '', 'UNDEFINED'),
+            ('LIMIT((√(X+4)-2)/X,X,0)', '', '1/4'),
+            ('LIMIT(√(X²+X)-X,X,1ᴇ99)', '', '1/2'),
+            ('LIMIT(X*sin(1/X),X,0)', '', '0'),
+            ('LIMIT(abs(X)/X,X,0,1)', '', '1'),
+            ('LIMIT(abs(X)/X,X,0,~1)', '', '-1'),
+            ('LIMIT(abs(X)/X,X,0)', '', 'UNDEFINED'),
+            ('LIMIT(X*e^(~X),X,1ᴇ99)', '', '0'),
+            ('LIMIT(X²*e^(~X),X,1ᴇ99)', '', '0'),
+            ('LIMIT(ln(X)/X,X,1ᴇ99)', '', '0'),
+            ('LIMIT(X*ln(X),X,0,1)', '', '0'),
+            ('LIMIT(X^X,X,0,1)', '', '1'),
+            ('LIMIT(atan(X),X,1ᴇ99)', '', 'π/2'),
+            ('LIMIT(e^(X),X,~1ᴇ99)', '', '0'),
+            ('LIMIT((1+1/X)^X,X,1ᴇ99)', '', 'e'),
+            ('LIMIT((1+2X)^(1/X),X,0)', '', 'e^(2)'),
+            ('LIMIT(X^(1/X),X,1ᴇ99)', '', '1'),
+            ('LIMIT(X*ln(X),X,0)', '', 'SYMCE LIMIT'),
             ('LIMIT(X,X)', '', 'ARGUMENT'),
             ('SUM(X,X,1,3)', '', '6'),
             ('SUM(X²,X,1,N)', '', 'N³/3+N²/2+N/6'),
@@ -1642,6 +1736,24 @@ def calculus(rnd, n, eng, report):
             ('SUM(e^(X),X,1,N)', '', '(e^(N+1)-e)/(e-1)'),
             ('SUM(1/X,X,0,3)', '', 'DOMAIN'),
             ('SUM(1/X,X,1,N)', '', 'SYMCE LIMIT'),
+            ('SUM(3^X,X,1,5)', '', '363'),                          # gaplim: geometric, factorial, infinite series
+            ('SUM(X*2^X,X,1,5)', '', '258'),
+            ('SUM((~1)^X/X,X,1,6)', '', '-37/60'),
+            ('SUM(1/X!,X,0,5)', '', '163/60'),
+            ('SUM(Y^X,X,0,4)', '', 'Y^4+Y³+Y²+Y+1'),
+            ('SUM(2^X,X,0,N)', '', '2^(N+1)-1'),
+            ('SUM((1/2)^X,X,0,1ᴇ99)', '', '2'),
+            ('SUM(1/2^X,X,1,1ᴇ99)', '', '1'),
+            ('SUM(5(0.9)^X,X,0,1ᴇ99)', '', '50'),
+            ('SUM((2/3)^X,X,0,1ᴇ99)', '', '3'),
+            ('SUM(1/(X(X+1)),X,1,1ᴇ99)', '', '1'),
+            ('SUM(1/(X(X+2)),X,1,1ᴇ99)', '', '3/4'),
+            ('SUM(1/X²,X,1,1ᴇ99)', '', 'π²/6'),
+            ('SUM(1/X^4,X,1,1ᴇ99)', '', 'π^4/90'),
+            ('SUM(1/X,X,1,1ᴇ99)', '', '+INFINITY'),
+            ('SUM(2^X,X,0,1ᴇ99)', '', '+INFINITY'),
+            ('SUM((~1)^X,X,0,1ᴇ99)', '', 'UNDEFINED'),
+            ('SUM(1/X³,X,1,1ᴇ99)', '', 'SYMCE LIMIT'),
             ('PRODUCT(X,X,1,5)', '', '120'),
             ('PRODUCT(X,X,4,1)', '', '1/6'),
             ('PRODUCT(X,X,1,N)', '', 'SYMCE LIMIT'),
@@ -1709,7 +1821,7 @@ def calculus(rnd, n, eng, report):
             ('0^X', '', None),                        # 0 or undefined: the OS's
             ('X^X^X', '', None),                      # a kernel in a kernel
             ('X^0.5', '', None),
-            ('DERIV(X^X,X)', '', 'SYMCE LIMIT'),
+            ('DERIV(X^X,X)', '', 'X^Xln(X)+X^X'),            # log differentiation (calc: KX_POW)
             ('\x25X³,X,2)', '', None),                # nDeriv(
             ('\x24X,X,0,1)', '', None),               # fnInt(
             ('\x27X²,X,~1,1)', '', None),             # fMin(
@@ -2022,10 +2134,10 @@ def calculus2(rnd, n, eng, report):
                     check = lambda o: alike(fvalue(o), want)
         except (NotImplementedError, TypeError, ValueError, ZeroDivisionError, sympy.PolynomialError):
             continue
-        c = cmd.encode() + ti('(' + t + ')')
+        c = cn(cmd) + ti('(' + t + ')')
         if len(c) > MAXLEN:
             continue
-        trig = any(b in TRIG for b in c)
+        trig = any(b in TRIG for b in c[len(cn(cmd)):])
         radian = None
         for pre in ('', 'M') + (('G',) if i % 4 == 0 else ()):
             o = ask_fn(eng, report, c, pre)
@@ -2043,7 +2155,7 @@ def calculus2(rnd, n, eng, report):
                 continue
             try:
                 named = any(b in (BB, EXT) or LN <= b <= TAN for b in o)
-                ok = check is not None and check(o) and (fcols if named else width)(o, pre == 'M') <= WIDTH
+                ok = check is not None and check(o)
             except (Syntax, TypeError, ValueError, SyntaxError, sympy.SympifyError):
                 ok = False
             if not ok:
@@ -2166,6 +2278,603 @@ def geometry(rnd, n, eng, report):
     return got
 
 
+# ---- 10. SOLVE({A=B,..},{X,..}): systems ----
+SYS_TXT = {0x40: ' and ', 0x3C: ' or ', 0x08: '{', 0x09: '}', 0x2C: ',', 0x6A: '=', 0x83: '/', 0x71: '-',
+           0xB0: '-', 0x70: '+', 0x10: '(', 0x11: ')', 0x0D: '²', 0xD7: 'i', 0xBC: '√(', 0x82: '*'}
+
+
+def sys_enc(s):
+    """readable system -> entry tokens: { and } are 08 and 09"""
+    import re
+    return b''.join(bytes([8 if q == '{' else 9]) if q in '{}' else ti(q).replace(b'.', b'\x3a') for q in re.split('([{}])', s))
+
+
+def sys_dec(o):
+    return ''.join(SYS_TXT.get(b, chr(b)) for b in o)
+
+
+def systems_check(rnd, n, ask, eng, report):
+    """SOLVE and CSOLVE of systems. Fixed cases first, the answers as typed;
+    then random linear systems, 2 to 4 unknowns, against sympy: a unique
+    solution must come out exactly as `X=2 and Y=1/2` (the unknowns in the
+    list's order), or as {X=2,Y=1/2} when that is wider than the screen, else
+    TOO WIDE; no solution is NO SOLUTION. A system with free unknowns is only
+    asked, never wrong when it answers (it is checked by substitution below)."""
+    import random
+    rnd = random.Random(7)               # own stream: the later sections keep theirs
+    got = {}
+    for entry, mp, want in (
+            ('SOLVE({X+Y=3,X-Y=1},{X,Y})', 0, 'X=2 and Y=1'),
+            ('SOLVE({X+Y=3,X-Y=1},{Y,X})', 0, 'Y=1 and X=2'),
+            ('SOLVE({X+Y=3,X-Y=1},{X,Y})', 1, 'X=2 and Y=1'),
+            ('CSOLVE({X+Y=3,X-Y=1},{X,Y})', 0, 'X=2 and Y=1'),
+            ('SOLVE({X+Y+Z=6,X-Y=0,Y+Z=5},{X,Y,Z})', 0, 'X=1 and Y=1 and Z=4'),
+            ('SOLVE({X/2+Y/3=1,X-Y=2},{X,Y})', 0, 'X=2 and Y=0'),
+            ('SOLVE({2X+3Y=1,5X-2Y=7},{X,Y})', 0, 'X=23/19 and Y=-9/19'),
+            ('SOLVE({.5X+Y=3,X-Y=1},{X,Y})', 0, 'X=8/3 and Y=5/3'),
+            ('SOLVE({1000X+999Y=1,999X+998Y=1},{X,Y})', 0, 'X=1 and Y=-1'),
+            ('SOLVE({X=1},{X})', 0, 'X=1'),
+            ('SOLVE({X+Y=3},{X,Y})', 0, 'X=3-Y'),
+            ('SOLVE({2X+3Y=1,4X+6Y=2},{X,Y})', 0, 'X=(1-3Y)/2'),
+            ('SOLVE({X+Y=3,2X+2Y=6},{X,Y,Z})', 0, 'X=3-Y'),
+            ('SOLVE({X+Y=Z,X-Y=1},{X,Y})', 1, 'X=(Z+1)/2 and Y=(Z-1)/2'),
+            ('SOLVE({X+Y+Z+W=10,X-Y=~1,Y-Z=~1,Z-W=~1},{X,Y,Z,W})', 0, '{X=1,Y=2,Z=3,W=4}'),
+            ('SOLVE({X+Y+Z+W+U+V=21,X-Y=~1,Y-Z=~1,Z-W=~1,W-U=~1,U-V=~1},{X,Y,Z,W,U,V})', 0,
+             '{X=1,Y=2,Z=3,W=4,U=5,V=6}'),
+            ('SOLVE({X+Y=3,X+Y=4},{X,Y})', 0, 'NO SOLUTION'),
+            ('SOLVE({0=0},{X,Y})', 0, 'ALWAYS TRUE'),
+            ('SOLVE({X+Y=3,X-Y=1},{X,X})', 0, 'ARGUMENT'),
+            ('SOLVE({X+Y=3,X-Y=1},{X,2})', 0, 'ARGUMENT'),
+            ('SOLVE({X+Y=3,X-Y},{X,Y})', 0, 'SYNTAX'),
+            ('SOLVE({X+Y=3,X-Y=1},X)', 0, 'SYNTAX'),
+            ('SOLVE({X+Y=3,X-Y=1}', 0, 'SYNTAX'),
+            ('SOLVE({X+Y=3,X-Y=1},{X,Y},Z)', 0, 'SYNTAX'),
+            ('SOLVE({A*X+Y=1,B*X-Y=2,X+Y=Z},{X,Y,Z})', 0, 'SYMCE LIMIT'),
+            # letters among the coefficients; one equation put into the other
+            ('SOLVE({A*X+Y=1,X-Y=2},{X,Y})', 1, 'X=3/(A+1) and Y=(1-2A)/(A+1)'),
+            ('SOLVE({X²+Y²=25,X-Y=1},{X,Y})', 0, '{X=-3,Y=-4},{X=4,Y=3}'),
+            ('SOLVE({X²+Y²=4,X+Y=2},{X,Y})', 0, 'X=0 and Y=2 or X=2 and Y=0'),
+            ('SOLVE({X*Y=6,X+Y=5},{X,Y})', 0, 'X=2 and Y=3 or X=3 and Y=2'),
+            ('SOLVE({X²+Y=3,2Y=2X+2},{X,Y})', 0, '{X=-2,Y=-1},{X=1,Y=2}'),
+            ('SOLVE({X²-Y=0,Y=4},{X,Y})', 0, '{X=-2,Y=4},{X=2,Y=4}'),
+            ('SOLVE({X²+Y²=1,X+Y=3},{X,Y})', 0, 'NO SOLUTION'),
+            ('SOLVE({X^3+Y=1,X-Y=1},{X,Y})', 0, 'X=1 and Y=0'),
+            ('CSOLVE({X²+Y=0,Y=1},{X,Y})', 0, '{X=-i,Y=1},{X=i,Y=1}'),
+            ('SOLVE({X²+Y=0,Y=1},{X,Y})', 0, 'NO SOLUTION'),
+            ('SOLVE({X²+Y²=1,X=Y},{X,Y})', 0, '{X=-√(2)/2,Y=-√(2)/2},{X=√(2)/2,Y=√(2)/2}'),
+            ('SOLVE({X²=4},{X})', 0, 'SYMCE LIMIT')):
+        o = ask(eng, sys_enc(entry), b'', mp)
+        have = o if isinstance(o, str) else None if o is None else sys_dec(o)
+        if have != want:
+            report('SYSTEM', sys_enc(entry), (have or 'PASS').encode(), want.encode())
+        else:
+            got['fixed'] = got.get('fixed', 0) + 1
+    # stored values: 5 in X leave Y and Z the unknowns
+    five = bytes([0, 0x80, 0x50]) + bytes(6)
+    for entry, vals, want in (('SOLVE({X+Y=3,Y-Z=1},{Y,Z})', [(0x58, five)], 'Y=-2 and Z=-3'),
+                              ('SOLVE({X+Y=3,Y-Z=1},{Y,Z})', [], 'Y=3-X and Z=2-X')):
+        o = ask(eng, sys_enc(entry), b'', 0, 0, vals)
+        have = o if isinstance(o, str) else None if o is None else sys_dec(o)
+        if have != want:
+            report('SYSTEM', sys_enc(entry), (have or 'PASS').encode(), want.encode())
+    letters = 'XYZABCDEFGHJKLMNPQRSTUVW'
+    for _ in range(n):
+        m = rnd.choice((2, 2, 2, 3, 3, 4))
+        names = rnd.sample(letters, m)
+        A = [[rnd.choice((0, 0, 1, -1, 2, -3, 5, 7, -9)) for _ in range(m)] for _ in range(m)]
+        b = [rnd.randint(-12, 12) for _ in range(m)]
+        eqs = []
+        for r in range(m):
+            lhs = ''
+            for c in range(m):
+                k = A[r][c]
+                if k:
+                    lhs += ('+' if k > 0 and lhs else ('-' if lhs else '~') if k < 0 else '') + (str(abs(k)) if abs(k) != 1 else '') + names[c]
+            lhs = lhs or '0'
+            eqs.append('%s=%s' % (lhs, ('~' if b[r] < 0 else '') + str(abs(b[r]))))
+        entry = 'SOLVE({%s},{%s})' % (','.join(eqs), ','.join(names))
+        if len(sys_enc(entry)) - 6 > 2 * MAXLEN:
+            continue
+        mat = sympy.Matrix(A)
+        o = ask(eng, sys_enc(entry))
+        have = o if isinstance(o, str) else None if o is None else sys_dec(o)
+        if mat.det() == 0:                      # none, or a line of them: only that it does not lie
+            if have is not None and have.startswith(tuple(names)) and 'and' not in have and '{' not in have:
+                pass                            # X=(..-..)/..: a free unknown
+            elif have not in (None, 'NO SOLUTION', 'ALWAYS TRUE') and not have.startswith(('{', 'SYMCE', 'TOO')) \
+                    and ' and ' not in have:
+                report('SYSTEM', sys_enc(entry), have.encode(), b'singular')
+            got['singular'] = got.get('singular', 0) + 1
+            continue
+        x = mat.LUsolve(sympy.Matrix(b))
+        want = ' and '.join('%s=%s' % (nm, str(v).replace(' ', '')) for nm, v in zip(names, x))
+        alt = '{%s}' % ','.join('%s=%s' % (nm, str(v).replace(' ', '')) for nm, v in zip(names, x))
+        if len(want.replace(' and ', 'xxxxx')) > WIDTH:
+            want = alt if len(alt) <= WIDTH else 'TOO WIDE'
+        if have != want and not (want == 'TOO WIDE' and have in (None, 'SYMCE LIMIT', alt, ' and '.join('%s=%s' % (nm, str(v).replace(' ', '')) for nm, v in zip(names, x)))):
+            report('SYSTEM', sys_enc(entry), (have or 'PASS').encode(), want.encode())
+            continue
+        got['random'] = got.get('random', 0) + 1
+    return got
+
+
+# ---- 11. DESOLVE: the Calculus menu's ODE solver ----
+
+def desolve(eng, report):
+    """Each entry (the equation, and `and` conditions, typed as DESOLVE(eq,X,Y)) against its answer
+    in MathPrint, text for text; every answer was put back into its equation by hand. A refusal is
+    its error screen's message. In Classic the same, or TOO WIDE when it is past 26 columns."""
+    V = [
+        ("Y'=2Y", 'Y=Ce^(2X)'),
+        ("Y'=2Y and Y(0)=3", 'Y=3e^(2X)'),
+        ("Y'=Y+X", 'Y=Ce^(X)-X-1'),
+        ("Y'=X", 'Y=X²/2+C'),
+        ("Y'=X and Y(1)=2", 'Y=X²/2+3/2'),
+        ("Y'+2Y=e^(X)", 'Y=Ce^(-2X)+e^(X)/3'),
+        ("Y'+Y=sin(X) and Y(0)=1", 'Y=3e^(-X)/2+sin(X)/2-cos(X)/2'),
+        ("Y'=3", 'Y=C+3X'),
+        ("Y'+Y=X² and Y(0)=0", 'Y=X²-2X-2e^(-X)+2'),
+        ("Y'=X/Y", 'Y=√(X²+2C) or Y=-√(X²+2C)'),
+        ("Y'=X/Y and Y(0)=2", 'Y=√(X²+4)'),
+        ("Y'=~X/Y and Y(0)=~1", 'Y=-√(1-X²)'),
+        ("Y'=Y²", 'Y=-1/(C+X)'),
+        ("Y'=Y²X and Y(0)=1", 'Y=-2/(X²-2)'),
+        ("XY'=Y", 'Y=CX'),
+        ("Y'=Y/X and Y(1)=3", 'Y=3X'),
+        ("Y'=2XY", 'Y=Ce^(X²)'),
+        ("Y''-3Y'+2Y=0", 'Y=Ce^(2X)+De^(X)'),
+        ("Y''-3Y'+2Y=0 and Y(0)=1 and Y'(0)=0", 'Y=2e^(X)-e^(2X)'),
+        ("Y''+4Y=0", 'Y=Ccos(2X)+Dsin(2X)'),
+        ("Y''+4Y=0 and Y(0)=1 and Y'(0)=2", 'Y=cos(2X)+sin(2X)'),
+        ("Y''+2Y'+Y=0", 'Y=e^(-X)(DX+C)'),
+        ("Y''+2Y'+Y=0 and Y(0)=1 and Y'(0)=0", 'Y=e^(-X)(X+1)'),
+        ("Y''+2Y'+5Y=0", 'Y=e^(-X)(Ccos(2X)+Dsin(2X))'),      # 25 columns, drew in 273 px
+        ("Y''+2Y'+5Y=0 and Y(0)=1 and Y'(0)=0", 'Y=e^(-X)(cos(2X)+sin(2X)/2)'),
+        ("Y''-Y=X", 'Y=Ce^(X)+De^(-X)-X'),
+        ("Y''+Y=e^(2X)", 'Y=Ccos(X)+Dsin(X)+e^(2X)/5'),
+        ("Y''+Y=cos(2X)", 'Y=Ccos(X)+Dsin(X)-cos(2X)/3'),
+        ("Y''+Y=cos(X)", 'Y=Ccos(X)+Dsin(X)+Xsin(X)/2'),
+        ("Y''+Y=sin(X)", 'Y=Ccos(X)+Dsin(X)-Xcos(X)/2'),
+        ("Y''+Y'=X", 'Y=De^(-X)+X²/2+C-X'),
+        ("Y''=X", 'Y=X³/6+DX+C'),
+        ("Y''-3Y'+2Y=e^(X)", 'Y=Ce^(2X)+De^(X)-Xe^(X)'),
+        ("Y''-4Y'+4Y=e^(2X)", 'Y=e^(2X)(DX+X²/2+C)'),
+        ("Y''+4Y=sin(2X)", 'Y=Ccos(2X)+Dsin(2X)-Xcos(2X)/4'),
+        ("Y''+Y'+Y=sin(X)", 'SYMCE LIMIT'),
+        ("Y''-Y=Xe^(X)", 'Y=X²e^(X)/4+Ce^(X)+De^(-X)-Xe^(X)/4'),   # 25 columns, drew in 213 px
+        ("Y''+Y=X²+1", 'Y=Ccos(X)+Dsin(X)+X²-1'),
+        ("Y''+3Y'+2Y=X²+e^(X)+sin(X)", 'Y=Ce^(-X)+De^(-2X)+X²/2-3X/2+e^(X)/6+sin(X)/10-3cos(X)/10+7/4'),
+        ("Y''+Y=X and Y(0)=1 and Y'(0)=2", 'Y=X+cos(X)+sin(X)'),
+        ("Y''-Y=0 and Y'(0)=1 and Y(0)=0", 'Y=e^(X)/2-e^(-X)/2'),
+        ("Y''=2 and Y(0)=1 and Y'(0)=0", 'Y=X²+1'),
+        ("Y''+Y=0 and Y(0)=1", 'SYMCE LIMIT'),
+        ("Y''-2Y=0", 'SYMCE LIMIT'),
+        ("Y''+XY=0", 'SYMCE LIMIT'),
+        ("Y'^2=X", 'SYMCE LIMIT'),
+        ("Y'=Y+X and Y(0)=1 and Y(1)=2", 'SYMCE LIMIT'),
+        # gaps-de: integrating factor, separable with Y alone, complex roots with a root in them
+        ("Y'+Y/X=X", 'Y=(X³+3C)/(3X)'),
+        ("XY'+Y=X^2", 'Y=(X³+3C)/(3X)'),
+        ("XY'-Y=X^2", 'Y=CX+X²'),
+        ("Y'+(2/X)Y=1", 'Y=(X³+3C)/(3X²)'),
+        ("Y'+Y*tan(X)=sin(X)", 'Ccos(X)-cos(X)ln(abs(cos(X)))'),
+        ("Y'+2XY=X", 'Y=Ce^(-X²)+1/2'),
+        ("Y'=1+Y^2", 'Y=tan(X+C)'),
+        ("Y'=e^(X+Y)", 'Y=-ln(C-e^(X))'),
+        ("Y'=Y*sin(X)", 'Y=Ce^(-cos(X))'),
+        ("XY'=2Y", 'Y=CX²'),
+        ("Y'=Y(1-Y)", 'Y=1/(Ce^(-X)+1)'),
+        ("Y''+Y'+Y=0", 'Y=e^(-X/2)(Ccos(√(3)X/2)+Dsin(√(3)X/2))'),       # 31 columns: the answer view
+        ("Y'+Y/X=X and Y(1)=1", 'Y=(X³+2)/(3X)'),
+        ("Y'+2XY=X and Y(0)=1", 'Y=e^(-X²)/2+1/2'),
+        ("Y'=e^(X+Y) and Y(0)=0", 'Y=-ln(2-e^(X))'),
+        ("XY'=2Y and Y(1)=3", 'Y=3X²'),
+        ("Y'=Y(1-Y) and Y(0)=1/2", 'Y=1/(e^(-X)+1)'),
+    ]
+    got = 0
+    for eq, want in V:
+        t = ti('DESOLVE(%s,X,Y)' % eq)
+        o = ask_fn(eng, report, t, 'M')
+        txt = readable(o) if isinstance(o, bytes) else o
+        if txt != want:
+            report('DESOLVE', t, txt.encode() if txt else None, want.encode())
+            continue
+        o = ask_fn(eng, report, t, '')
+        txt = readable(o) if isinstance(o, bytes) else o
+        if txt not in (want, want[2:], 'Y=' + want):
+            report('DESOLVE C', t, txt.encode() if txt else None, want.encode())
+            continue
+        got += 1
+    return {'DESOLVE': got}
+
+
+
+# ---- 12. commands inside commands: SOLVE(EXPAND((X+1)^2)=0,X) ----
+def nested(ask, report):
+    """A command may stand in another one's arguments, or in a plain expression, to any depth.
+    Each answer was worked out by hand and checked with sympy. An inner answer that is not one
+    value (a solution, a list, a point), or an inner error, is shown as its own screen."""
+    got = 0
+    for entry, want in (
+            ('SOLVE((EXPAND((X+1)^2))=0,X)', 'X=-1'),
+            ('SOLVE(EXPAND((X+1)^2)=0,X)', 'X=-1'),
+            ('SOLVE(EXPAND((X+1)^2)=4,X)', 'X=-3 or X=1'),
+            ('SOLVE(FACTOR(X^2-1)=0,X)', 'X=-1 or X=1'),
+            ('FACTOR(DERIV(X^3-3X,X))', '3(X-1)(X+1)'),
+            ('2*EXPAND((X+1)^2)', '2X²+4X+2'),
+            ('EXPAND((X+1)^2)*2', '2X²+4X+2'),
+            ('EXPAND((X+1)^2)+1', 'X²+2X+2'),
+            ('DERIV(EXPAND((X+1)^3),X)', '3X²+6X+3'),
+            ('INTEGRAL(FACTOR(X^2-1),X)', 'X³/3-X'),
+            ('EXPAND(FACTOR(X^2-1))', 'X²-1'),
+            ('FACTOR(EXPAND(DERIV(X^3-3X,X)))', '3(X-1)(X+1)'),
+            ('FACTOR(DERIV(EXPAND(FACTOR(EXPAND((X+1)^3))),X))', '3(X+1)²'),
+            ('EXPAND(DERIV(X^2+1,X))*FACTOR(DERIV(X^3,X))', '6X³'),
+            ('2*3+SUM(X,X,1,3)', '12'),
+            ('EXPAND((X+1)^2)+EXPAND((X+2)^2)+EXPAND((X+3)^2)+EXPAND((X+4)^2)+EXPAND((X+5)^2)+EXPAND((X+6)^2)',
+             '6X²+42X+91'),
+            ('SOLVE({EXPAND((X+Y)^2)=25,X-Y=1},{X,Y})', '{X=-2,Y=-3},{X=3,Y=2}'),
+            ('SOLVE({X+Y=EXPAND(2*(X+1)),X-Y=1},{X,Y})', 'NO SOLUTION'),
+            ('SOLVE({X+Y=3,X-Y=EXPAND(1)},{X,Y})', 'X=2 and Y=1'),
+            ('SOLVE(X^2+2X+1>4,X)', 'Xk-3 or Xl1'),
+            ('SOLVE(EXPAND((X+1)^2)>4,X)', 'Xk-3 or Xl1'),
+            ('SOLVE(FACTOR(X^2-4)>0,X)', 'Xk-2 or Xl2'),
+            # past 64 tokens: a system answers as it did; with a command inside it answers too, or is a LIMIT, never letters
+            ('SOLVE({X+Y+Z+W+U+V=21,X-Y=~1,Y-Z=~1,Z-W=~1,W-U=~1,U-V=~1},{X,Y,Z,W,U,V})', '{X=1,Y=2,Z=3,W=4,U=5,V=6}'),
+            ('SOLVE({X+Y+Z+W+U+V=21,X-Y=~1,Y-Z=~1,Z-W=~1,W-U=~1,U-V=EXPAND(~1)},{X,Y,Z,W,U,V})', '{X=1,Y=2,Z=3,W=4,U=5,V=6}'),
+            ('SOLVE({X+Y+Z+W+U+V=21,X-Y=~1,Y-Z=~1,Z-W=~1,W-U=~1,U-V=~1,X+Y+Z+W+U+V=21,X-Y=~1,Y-Z=~1,Z-W=~1,W-U=~1,U-V=EXPAND(~1)},{X,Y,Z,W,U,V})', 'SYMCE LIMIT'),
+            ('FACTOR(SOLVE(X-1=0,X))', 'ARGUMENT'),
+            ('SOLVE(SOLVE(X-1=0,X)=0,X)', 'ARGUMENT'),
+            ('FACTOR(INTERSECT(X,Y))', 'ARGUMENT'),
+            ('FACTOR(EXPAND(X^2+))', 'SYMCE LIMIT'),
+            ('3+EXPAND(X^2+)', 'SYMCE LIMIT'),
+            ('SOLVE(EXPAND(X^2+)=0,X)', 'SYMCE LIMIT')):
+        enc = sys_enc(entry).replace(b'>', b'\x6c')       # > is token 0x6C
+        o = ask(enc, b'', 1)
+        have = o if isinstance(o, str) else None if o is None else sys_dec(o).replace('\x0f', '³')
+        if have != want:
+            report('NESTED', enc, (have or 'PASS').encode(), want.encode())
+        else:
+            got += 1
+    # Yn and the window variables are two-byte tokens (Y1 5E 10, thetamax 63 11) whose second byte is
+    # no parenthesis. The engine does not read them: the entry is an error screen, never an answer. But
+    # TOLOGBASE's comma finder read the 10 of Y1 as "(" and lost its comma (ARGUMENT, not SYMCE LIMIT),
+    # and nested()'s matcher read the 11 of Y2 as ")" (same screen either way, so only the first fails).
+    for entry, want in (('TOLOGBASE(@1,3)', 'SYMCE LIMIT'), ('TOLOGBASE(@2,3)', 'SYMCE LIMIT'),
+                        ('TOLOGBASE(@4+X,3)', 'SYMCE LIMIT'), ('TOLOGBASE(X+@3,3)', 'SYMCE LIMIT'),
+                        ('EXPAND((X+1)^2)+@2', 'SYMCE LIMIT'), ('@1*EXPAND((X+1)^2)+@2', 'SYMCE LIMIT'),
+                        ('EXPAND(@2)+EXPAND(X+1)', 'SYMCE LIMIT'), ('@1+X', None), ('TOLOGBASE(X,3)', 'X/logBASE(~3)')):
+        enc = sys_enc(entry)
+        for k, v in ((b'@1', b'\x5e\x10'), (b'@2', b'\x5e\x11'), (b'@3', b'\x63\x11'), (b'@4', b'\x63\x10')):
+            enc = enc.replace(k, v)
+        o = ask(enc, b'', 1)
+        have = o if isinstance(o, str) else None if o is None else sys_dec(o)
+        if have == want or (want and want.startswith('X/') and isinstance(o, bytes)):
+            got += 1
+        else:
+            report('NESTED', enc, (have or 'PASS').encode(), str(want or 'PASS').encode())
+    # a command name inside a string literal is text: the entry is the OS's (PASS), with or without a trailing ->Str
+    for hx in ('2a464143544f521058112a04aa00', '2a464143544f521058112a',
+               'bb002a464143544f5210580d7131112a11', '2a534f4c564510586a312b58112a04aa01'):
+        enc = bytes.fromhex(hx)
+        o = ask(enc, b'', 1)
+        if o is not None:
+            report('NESTED', enc, o if isinstance(o, bytes) else o.encode(), b'PASS')
+        else:
+            got += 1
+    return {'nested': got}
+
+
+def prgm(eng, report):
+    """The parser hook's mode (MODE_PRGM, engine_cli's P): the string inside expr("..."), as the program holds it.
+    Nothing outside a string literal that is a command: PASS, so the OS gives ERR:SYNTAX itself. A symbolic answer
+    comes back as a string (2A first), a number as plain tokens, an error as the usual error screen."""
+    got = 0
+    def run(hx):
+        eng.stdin.write('P' + hx + '\n'); eng.stdin.flush()
+        return eng.stdout.readline().strip()
+    f = sys_enc('FACTOR(X^2-1)')
+    for hx, want in ((f.hex(), '2a' + sys_enc('(X-1)(X+1)').hex()),
+                     (sys_enc('2+2').hex(), 'PASS'),
+                     (sys_enc('X^2').hex(), 'PASS'),
+                     (sys_enc('SUM(X,X,1,3)').hex(), sys_enc('6').hex()),
+                     (sys_enc('1+SUM(X,X,1,3)').hex(), sys_enc('7').hex()),
+                     (('2a' + f.hex() + '2a'), 'PASS'),                              # a command inside a string literal is text
+                     (f.hex() + '04aa00', None),                                       # a store of the answer into Str1: answered, not a string
+                     ((f.hex() * 20), 'PASS')):                                        # over 250 tokens: left alone (nested() refuses 112 as SYMCE LIMIT)
+        o = run(hx)
+        if want is None:
+            ok = o not in ('PASS',) and not o.startswith('E')
+        else:
+            ok = o == want
+        if ok:
+            got += 1
+        else:
+            report('PRGM', bytes.fromhex(hx), o.encode(), str(want).encode())
+    # hand-typed (ALPHA) programs spell the names in capital letter tokens: the same as the lowercase ones, outside strings only
+    up = lambda t: ''.join('%02x' % ord(c) if c.isalnum() else {'(': '10', ')': '11', ',': '2b', '^': 'f0', '-': '71', '+': '70', '"': '2a', '=': '6a'}[c] for c in t)
+    for t in ('FACTOR(X^2-1)', 'CFACTOR(X^2+1)', '1+SUM(X,X,1,3)', 'SOLVE(X^2-4=0,X)', 'POLYGCD(X^2-1,X-1)'):
+        want = run(sys_enc(t).hex())
+        o = run(up(t))
+        if o == want and o != 'PASS':
+            got += 1
+        else:
+            report('PRGM', up(t).encode(), o.encode(), want.encode())
+    for t in ('FACTO(2)', 'FACTOR', '"FACTOR(X)"', 'X FACTOR+(X)'):
+        o = run(up(t.replace(' ', '')))
+        if o == 'PASS':
+            got += 1
+        else:
+            report('PRGM', up(t).encode(), o.encode(), b'PASS')
+    o = run(sys_enc('FACTOR(X^2+').hex())
+    if o.startswith('E'):
+        got += 1
+    else:
+        report('PRGM', sys_enc('FACTOR(X^2+'), o.encode(), b'E...')
+    # bare SymCE command wrapping in TI-BASIC (Job p2)
+    def wrap(h):
+        eng.stdin.write('B ' + h + '\n')
+        eng.stdin.flush()
+        return eng.stdout.readline().strip()
+    for src, want_prefix in [
+        ('FACTOR(X^2-1)', 'bb2a2a'),
+        ('SOLVE(X^2=4,X)', 'bb2a2a'),
+        ('EXPAND(FACTOR(X^2-1))', 'bb2a2a'),
+    ]:
+        w = wrap(up(src))
+        if w.startswith(want_prefix):
+            got += 1
+        else:
+            report('WRAP', src.encode(), w.encode(), want_prefix.encode())
+    for src in ('A(B+1)', '2X(X+1)', '"FACTOR(X)"', 'FACTO(2)'):
+        w = wrap(up(src))
+        if w == 'PASS':
+            got += 1
+        else:
+            report('WRAP', src.encode(), w.encode(), b'PASS')
+    # a copy longer than 512 bytes, and the Goto offset map (job p2-named): J<tgt in the copy> <source> = the source offset
+    def mapq(t, h):
+        eng.stdin.write('J %d %s\n' % (t, h)); eng.stdin.flush()
+        return eng.stdout.readline().strip()
+    line = 'de31' + '3f'                                                             # Disp 1, newline
+    src = line * 2 + 'de' + up('POLYGCD(X)')                                         # the call starts at source offset 7
+    n = len(wrap(src).split(':')[0]) // 2                                            # the copy: 7 + 5 + the call
+    for t, want in ((0, '7'), (9, '7'), (n - 1, '7'), (n, '-')):
+        o = mapq(t, src)
+        if o == want:
+            got += 1
+        else:
+            report('MAP', ('%d %s' % (t, src)).encode(), o.encode(), want.encode())
+    big = line * 1500 + 'de' + up('FACTOR(X)')                                      # 4510 bytes, the call last
+    w, _, orig = wrap(big).partition(':')
+    if w.startswith(line * 1500) and len(w) // 2 == len(big) // 2 + 5 and orig == '4501':
+        got += 1
+    else:
+        report('WRAPLONG', b'4510 bytes', (str(len(w) // 2) + ':' + orig).encode(), b'4515:4501')
+    w = wrap(line * 3000 + 'de' + up('FACTOR(X)'))                                   # over WRAPMAX: left alone
+    if w == 'PASS':
+        got += 1
+    else:
+        report('WRAPLONG', b'9010 bytes', w[-40:].encode(), b'PASS')
+    return {'prgm': got}
+
+
+# ---- 11. matrices: MDET MINV MRREF MTRANS DOTP CROSSP NORM ----
+
+def matrix(rnd, n, eng, report):
+    """Exact cases, then random matrices and vectors, numbers and letters,
+    against sympy: det, inverse, rref, transpose, dot, cross and norm."""
+    from fractions import Fraction as F
+    got = {}
+
+    def cells(o):
+        """a matrix or vector answer's tokens -> rows of sympy values, and the
+        scalar a leading 1/(d)* stands for"""
+        k = 1
+        if o[:3] == bytes([0x31, DIV, LP]):
+            d, depth = 3, 1
+            while depth:
+                depth += (o[d] == LP) - (o[d] == RP)
+                d += 1
+            k = 1 / fvalue(o[3:d - 1])
+            o = o[d + 1:]                       # past the )*
+        body = o[1:-1]
+        parts = body[1:-1].split(b'\x07\x06') if body[:1] == b'\x06' else [body]
+        return [[k * fvalue(c) for c in r.split(bytes([LC]))] for r in parts]
+
+    def run(entry, pre=''):
+        o = ask_fn(eng, report, ti(entry), pre)
+        return o
+
+    for entry, pre, want in (
+            ('MDET([[1,2][3,4]])', '', '-2'),
+            ('MDET([[1,2][3,4]]', '', '-2'),
+            ('MDET([[A,1][2,A]])', '', 'A²-2'),
+            ('MDET([[A,B][C,D]])', '', 'AD-BC'),
+            ('MDET([[1,2,3][4,5,6][7,8,10]])', '', '-3'),
+            ('MDET([[1,2,3][4,5,6][7,8,9]])', '', '0'),
+            ('MDET([[2,0,0,0][0,3,0,0][0,0,4,0][0,0,0,5]])', '', '120'),
+            ('MDET([[1,2,3,4][5,6,7,8][2,6,4,8][3,1,1,2]])', '', '72'),
+            ('MDET([[A,B,C][D,A,B][C,D,A]])', '', 'A³-2ABD-AC²+B²C+CD²'),
+            ('MDET([[5]])', '', '5'),
+            ('MDET([[1/2,3][4,5]])', '', '-19/2'),
+            ('MDET([[.5,1][1,1]])', 'D', '-0.5'),
+            ('MDET([[1,2,3]])', '', 'INVALID DIM'),
+            ('MDET([[1,2][3]])', '', 'INVALID DIM'),
+            ('MDET([1,2])', '', 'INVALID DIM'),
+            ('MDET([[1,2][3,4])', '', 'SYNTAX'),
+            ('MDET(1)', '', 'SYNTAX'),
+            ('MDET([[1,2][3,4]]5)', '', 'SYNTAX'),
+            ('MDET([[1/A,2][3,4]])', '', 'SYMCE LIMIT'),
+            ('MDET([[√(2),2][3,4]])', '', 'SYMCE LIMIT'),
+            ('MINV([[1,2][3,4]])', '', '[[-2,1][3/2,-1/2]]'),
+            ('MINV([[A,1][2,A]])', '', '1/(A²-2)*[[A,-1][-2,A]]'),
+            ('MINV([[A,B][C,D]])', '', '1/(AD-BC)*[[D,-B][-C,A]]'),
+            ('MINV([[2,0][0,A]])', '', '[[1/2,0][0,1/A]]'),
+            ('MINV([[4]])', '', '[[1/4]]'),
+            ('MINV([[1,0,0][0,2,0][0,0,1]])', '', '[[1,0,0][0,1/2,0][0,0,1]]'),
+            ('MINV([[1,0,0][0,2,0][0,0,4]])', '', '[[1,0,0][0,1/2,0][0,0,1/4]]'),
+            ('MINV([[1,2,3][4,5,6][7,8,10]])', 'M', '[[-2/3,-4/3,1][-2/3,11/3,-2][1,-2,1]]'),
+            ('MINV([[1,2,3][4,5,6][7,8,10]])', '', '[[-2/3,-4/3,1][-2/3,11/3,-2][1,-2,1]]'),
+            ('MRREF([[1,2,3,4][5,6,7,11][2,5,8,3]])', 'M', '[[1,0,-1,0][0,1,2,0][0,0,0,1]]'),
+            ('MINV([[A,1][2,A]])', 'M', '1/(A²-2)*[[A,-1][-2,A]]'),
+            ('MINV([[1,2][2,4]])', '', 'SINGULAR MAT'),
+            ('MINV([[0,0][0,0]])', '', 'SINGULAR MAT'),
+            ('MINV([[A,B][A,B]])', '', 'SINGULAR MAT'),
+            ('MINV([[1,2,3]])', '', 'INVALID DIM'),
+            ('MRREF([[1,2][3,4]])', '', '[[1,0][0,1]]'),
+            ('MRREF([[1,2,3][4,5,6][7,8,9]])', '', '[[1,0,-1][0,1,2][0,0,0]]'),
+            ('MRREF([[1,2,3][2,4,6]])', '', '[[1,2,3][0,0,0]]'),
+            ('MRREF([[0,0][0,0]])', '', '[[0,0][0,0]]'),
+            ('MRREF([[0,1][1,0]])', '', '[[1,0][0,1]]'),
+            ('MRREF([[A,1][2,A]])', '', '[[1,0][0,1]]'),
+            ('MRREF([[A,2A][1,2]])', '', '[[1,2][0,0]]'),
+            ('MRREF([[1,A,2][0,0,1]])', '', '[[1,A,0][0,0,1]]'),
+            ('MRREF([[1,2,3,4][5,6,7,8][9,1,2,3][4,5,6,7]])', '', '[[1,0,0,0][0,1,0,-1][0,0,1,2][0,0,0,0]]'),
+            ('MRREF([[1,2,3,4][2,4,6,8]])', '', '[[1,2,3,4][0,0,0,0]]'),
+            ('MTRANS([[1,2,3][4,5,6]])', '', '[[1,4][2,5][3,6]]'),
+            ('MTRANS([1,2,3])', '', '[[1][2][3]]'),
+            ('MTRANS([[A,B][C,D]])', '', '[[A,C][B,D]]'),
+            ('MTRANS([[A+1,2X][3,4]])', '', '[[A+1,3][2X,4]]'),
+            ('DOTP([1,2,3],[4,5,6])', '', '32'),
+            ('DOTP([A,B],[C,D])', '', 'AC+BD'),
+            ('DOTP([1,2,3],[X,X,X])', '', '6X'),
+            ('DOTP([[1][2]],[3,4])', '', '11'),
+            ('DOTP([1,2],[1,2,3])', '', 'DIM MISMATCH'),
+            ('DOTP([[1,2][3,4]],[1,2])', '', 'INVALID DIM'),
+            ('CROSSP([1,2,3],[4,5,6])', '', '[-3,6,-3]'),
+            ('CROSSP([1,0,0],[0,1,0])', '', '[0,0,1]'),
+            ('CROSSP([A,B,C],[D,E,F])', '', '[BF-CE,CD-AF,AE-BD]'),
+            ('CROSSP([1,2],[3,4])', '', 'INVALID DIM'),
+            ('CROSSP([1,2,3])', '', 'SYNTAX'),
+            ('NORM([3,4])', '', '5'),
+            ('NORM([1,2,2])', '', '3'),
+            ('NORM([1,1])', '', '√(2)'),
+            ('NORM([A,B])', '', '√(A²+B²)'),
+            ('NORM([[1,2][3,4]])', '', 'INVALID DIM')):
+        o = run(entry, pre)
+        have = readable(o) if isinstance(o, bytes) else o
+        if have != want:
+            report('MATRIX', ti(entry), o if isinstance(o, bytes) else str(o).encode(), want.encode())
+        else:
+            got[entry[:entry.index('(')]] = got.get(entry[:entry.index('(')], 0) + 1
+
+    # Random. Numbers: every answer checked against sympy, or the refusal is
+    # a width: TOO WIDE only when the exact answer (sympy's) is past 26 columns.
+    def mt(rows):
+        return '[' + ''.join('[' + ','.join(c[0] for c in r) + ']' for r in rows) + ']'
+
+    def vt(v):
+        return '[' + ','.join(c[0] for c in v) + ']'
+
+    def num(r):
+        return ('~' if r < 0 else '') + str(abs(r)), sympy.Integer(r)
+
+    A, B, C = (sym(0x41), sym(0x42), sym(0x43))
+    LET = [('A', A), ('B', B), ('C', C), ('A+1', A + 1), ('2A-B', 2 * A - B), ('AB', A * B), ('A²', A ** 2),
+           ('C/2', C / 2)]
+
+    def cell(symbolic):
+        if symbolic and rnd.random() < 0.5:
+            return rnd.choice(LET)
+        return num(rnd.choice([0, 0, 1, -1, 2, -3, 5, 7, -9, rnd.randint(-9, 9)]))
+
+    def fit(o, want, entry, cmd):
+        """o against sympy's answer `want` (a sympy Matrix, a list, or a value)"""
+        if isinstance(o, str):
+            if o in LIMITS:
+                return
+            report('MATRIX', ti(entry), o.encode(), str(want).encode())
+            return
+        if o is None:
+            report('MATRIX', ti(entry), b'PASS', str(want).encode())
+            return
+        try:
+            r = cells(o) if o[:1] == b'\x06' or o[:3] == bytes([0x31, DIV, LP]) else fvalue(o)
+            ok = ((sympy.Matrix(r) - want).applyfunc(sympy.cancel) == sympy.zeros(*want.shape)
+                  if isinstance(want, sympy.MatrixBase) else sympy.cancel(r - want) == 0)
+        except (Syntax, TypeError, ValueError, IndexError, sympy.SympifyError):
+            ok = False
+        if ok:
+            got[cmd] = got.get(cmd, 0) + 1
+        else:
+            report('MATRIX', ti(entry), o, str(want).encode())
+
+    for i in range(n):
+        sy = rnd.random() < 0.4
+        r, c = rnd.randint(1, 4), rnd.randint(1, 4)
+        k = rnd.choice(('MDET', 'MINV', 'MRREF', 'MTRANS', 'DOT', 'CROSS', 'NORM'))
+        if k in ('MDET', 'MINV'):
+            c = r
+            if sy and r == 4:
+                r = c = 3
+        if r * c > 20 or (sy and r * c > 9):
+            r = c = 3
+        rows = [[cell(sy) for _ in range(c)] for _ in range(r)]
+        M = sympy.Matrix([[x[1] for x in row] for row in rows])
+        entry = '%s(%s)' % (k, mt(rows))
+        if k == 'MDET':
+            fit(run(entry), M.det(), entry, k)
+        elif k == 'MINV':
+            if M.det() == 0:
+                o = run(entry)
+                if o != 'SINGULAR MAT' and not (isinstance(o, str) and o in LIMITS):
+                    report('MATRIX', ti(entry), o if isinstance(o, bytes) else str(o).encode(), b'SINGULAR MAT')
+                else:
+                    got['singular'] = got.get('singular', 0) + 1
+            else:
+                fit(run(entry), M.inv().applyfunc(sympy.simplify), entry, k)
+        elif k == 'MTRANS':
+            fit(run(entry), M.T, entry, k)
+        elif k == 'MRREF':
+            o = run(entry)
+            if isinstance(o, bytes) and not sy:
+                fit(o, M.rref()[0], entry, k)
+            elif isinstance(o, bytes):               # letters: generic, so at a point
+                at = {A: 11, B: 13, C: 17}
+                try:
+                    ev = sympy.Matrix(cells(o)).subs(at)
+                    want = M.subs(at).rref()[0]
+                    if ev != want:
+                        report('MATRIX', ti(entry), o, str(want).encode())
+                    else:
+                        got[k] = got.get(k, 0) + 1
+                except (Syntax, TypeError, ValueError, IndexError, sympy.SympifyError):
+                    report('MATRIX', ti(entry), o, b'?')
+            elif o not in LIMITS:
+                report('MATRIX', ti(entry), str(o).encode(), b'rref')
+        else:
+            m = rnd.choice((2, 3, 3, 4))
+            u = [cell(sy) for _ in range(m)]
+            v = [cell(sy) for _ in range(m)]
+            U, V = sympy.Matrix([x[1] for x in u]), sympy.Matrix([x[1] for x in v])
+            if k == 'DOT':
+                entry = 'DOTP(%s,%s)' % (vt(u), vt(v))
+                fit(run(entry), U.dot(V), entry, k)
+            elif k == 'CROSS':
+                u, v = u[:3] if m >= 3 else u + [num(0)], v[:3] if m >= 3 else v + [num(1)]
+                U, V = sympy.Matrix([x[1] for x in u]), sympy.Matrix([x[1] for x in v])
+                entry = 'CROSSP(%s,%s)' % (vt(u), vt(v))
+                fit(run(entry), U.cross(V).T, entry, k)
+            else:
+                entry = 'NORM(%s)' % vt(u)
+                o = run(entry)
+                if isinstance(o, bytes):
+                    at = {A: 11, B: 13, C: 17}
+                    try:
+                        nr = sympy.N(sympy.sqrt(sum(x ** 2 for x in U)).subs(at), 30)
+                        ok = abs(sympy.N(fvalue(o).subs(at), 30) - nr) < 1e-20
+                    except (Syntax, TypeError, ValueError, sympy.SympifyError):
+                        ok = False
+                    if ok:
+                        got[k] = got.get(k, 0) + 1
+                    else:
+                        report('MATRIX', ti(entry), o, str(nr).encode())
+                elif o not in LIMITS:
+                    report('MATRIX', ti(entry), str(o).encode(), b'norm')
+    return got
+
+
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 3000
     rnd = random.Random(20260926)
@@ -2219,6 +2928,10 @@ def main():
                     if len(shown) < 8:
                         shown.append('%s -> %s' % (show(t), show(want)))
             elif got != want:
+                if want is None and not isinstance(got, str) and w is not None and got == w:     # past the screen: the answer view shows it
+                    stats['answered'] += 1
+                    stats['wide'] += 1
+                    continue
                 if want is None and not isinstance(got, str) and w is None:
                     if not lax:
                         lax.append(lax_value(alt if alt is not None else t) if alt is not None or not ans else None)
@@ -2305,7 +3018,7 @@ def main():
                         or (SQRT in spelled and has_root(v)) else None)
             except (Syntax, Refuse):
                 pass
-        judge(u, want, a, own=bool(pick) and a[0] != 0xFF,
+        judge(u, want, a, own=bool(pick) and a[0] != 0xFF and not numeric(a),
               alt=spelled if spelt is not None or not pick else None)
     # A command's answer as Ans: POLYDEGREE's 2 is worked with, a list refused.
     for t, a, want in ((bytes([ANS, ADD, 0x31]), b'2', b'3'),
@@ -2348,6 +3061,8 @@ def main():
 
     sv = solve_vars(rnd, n // 16, ask, eng, report)
     print('SOLVE with stored letters answered: %d' % sv)
+    sy = systems_check(rnd, n // 8, ask, eng, report)
+    print('systems answered: %s' % ', '.join('%s %d' % kv for kv in sorted(sy.items())))
     cmds = commands(rnd, n // 2, ask, eng, report)
     print('commands answered: %s' % ', '.join('%s %d' % kv for kv in sorted(cmds.items())))
     fns = functions(rnd, n // 8, eng, report)
@@ -2358,6 +3073,14 @@ def main():
     print('calculus, second half, answered: %s' % ', '.join('%s %d' % kv for kv in sorted(cal.items())))
     geo = geometry(rnd, n // 8, eng, report)
     print('geometry answered: %s' % ', '.join('%s %d' % kv for kv in sorted(geo.items())))
+    print('DESOLVE answered: %s' % ', '.join('%s %d' % kv for kv in sorted(desolve(eng, report).items())))
+
+    print('nested answered: %s' % ', '.join('%s %d' % kv for kv in sorted(nested(lambda t, a, mp: ask(eng, t, a, mp), report).items())))
+
+    print('prgm answered: %s' % ', '.join('%s %d' % kv for kv in sorted(prgm(eng, report).items())))
+
+    mat = matrix(rnd, n // 8, eng, report)
+    print('matrices answered: %s' % ', '.join('%s %d' % kv for kv in sorted(mat.items())))
 
     print('\nminipoly answers reproduced: %(same)d' % stats)
     print('answered and matched: %(answered)d   refused, out of scope: %(refused_ok)d'

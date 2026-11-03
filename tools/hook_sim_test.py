@@ -217,10 +217,10 @@ case("sqrt(8X)",           "bc385811", "32bc325811")
 case("1/(1+sqrt(2))",      "318310317 0bc3211".replace(" ", ""), "bc321171 31".replace(" ", ""))
 
 print("\n--- commands; one it cannot do is an ERR screen the hook throws ---")
-case("FACTOR(X²-4)",  "464143544f52 10 580d7134 11".replace(" ", ""), "10587132111058703211")
-case("SOLVE(X²=4,X)", "534f4c5645 10 580d6a34 2b58 11".replace(" ", ""),
+case("FACTOR(X²-4)",  "bbb5bbb0bbb2bbc4bbbfbbc210580d713411".replace(" ", ""), "10587132111058703211")
+case("SOLVE(X²=4,X)", "bbc3bbbfbbbcbbc6bbb410580d6a342b5811".replace(" ", ""),
      "586ab032 3c 586a32".replace(" ", ""))
-case("SOLVE(X²=2,X), Classic columns", "534f4c5645 10 580d6a32 2b58 11".replace(" ", ""),
+case("SOLVE(X²=2,X), Classic columns", "bbc3bbbfbbbcbbc6bbb410580d6a322b5811".replace(" ", ""),
      "586ab0bc3211 3c 586abc3211".replace(" ", ""))
 
 
@@ -233,47 +233,48 @@ def thrown(name, entry, msg, **kw):
     except Trap as ex:
         return fail(name, ex)
     got = bytes(s.r8(ez80sim.APP_ERR1 + i) for i in range(len(msg) + 1))
-    if s.thrown != 0x2B:
-        return fail(name, "threw %r, want 0x2B" % s.thrown)
-    if got != msg + b'\0':
+    want = 0xAB if msg[:3] in (b"SYN", b"ARG") else 0x2B       # 2:Goto for those two
+    if s.thrown != want:
+        return fail(name, "threw %r, want 0x%02X" % (s.thrown, want))
+    # an empty detail is a space: the OS skips description lines that start empty (.Lerr)
+    if got != msg + (b' ' if msg.endswith(b'\0') else b'\0'):
         return fail(name, "appErr1 holds %r" % got)
     if s.r8(ez80sim.PENDING):
         return fail(name, "left the pending mark set")
     print("ok   %-24s ERROR: %s" % (name, msg.replace(b'\0', b' | ').decode()))
 
 
-thrown("SOLVE(X²+1=0,X)", "534f4c5645 10 580d7031 6a30 2b58 11".replace(" ", ""), b"NO SOLUTION\0")
-thrown("SOLVE(X=X,X)", "534f4c5645 10 586a58 2b58 11".replace(" ", ""), b"ALWAYS TRUE\0")
-thrown("SOLVE(X²+X=1,X), Classic", "534f4c5645 10 580d7058 6a31 2b58 11".replace(" ", ""),
-       b"TOO WIDE\0TRY MATHPRINT")
-thrown("SOLVE(X³=2,X)", "534f4c5645 10 580f6a32 2b58 11".replace(" ", ""), b"SYMCE LIMIT\0SOLVE")
-thrown("SOLVE(X²-4), no = or ,", "534f4c5645 10 580d7134 11".replace(" ", ""), b"SYNTAX\0SOLVE(A=B,X)")
-thrown("SOLVE(X²=4), no ,X", "534f4c5645 10 580d6a34 11".replace(" ", ""), b"SYNTAX\0SOLVE(A=B,X)")
+thrown("SOLVE(X²+1=0,X)", "bbc3bbbfbbbcbbc6bbb410580d70316a302b5811".replace(" ", ""), b"NO SOLUTION\0")
+thrown("SOLVE(X=X,X)", "bbc3bbbfbbbcbbc6bbb410586a582b5811".replace(" ", ""), b"ALWAYS TRUE\0")
+case("SOLVE(X²+X=1,X), wide", "bbc3bbbfbbbcbbc6bbb410580d70586a312b5811", "586a10b03171bc35111183323c586a10bc35117131118332")   # 29 columns: the answer view
+thrown("SOLVE(X³=2,X)", "bbc3bbbfbbbcbbc6bbb410580f6a322b5811".replace(" ", ""), b"SYMCE LIMIT\0SOLVE")
+thrown("SOLVE(X²-4), no = or ,", "bbc3bbbfbbbcbbc6bbb410580d713411".replace(" ", ""), b"SYNTAX\0SOLVE(A=B,X)")
+thrown("SOLVE(X²=4), no ,X", "bbc3bbbfbbbcbbc6bbb410580d6a3411".replace(" ", ""), b"SYNTAX\0SOLVE(A=B,X)")
 
 # The Algebra menu's commands: lists, i, and the errors they add.
-case('POLYROOTS(X²-2)', '504f4c59524f4f545310580d713211', '08b0bc32112cbc321109')
-case('CPOLYROOTS(X²+1)', '43504f4c59524f4f545310580d703111', '08b0d72cd709')
-case('CSOLVE(X²+1=0,X)', '43534f4c564510580d70316a302b5811', '586ab0d73c586ad7')
-case('CFACTOR(X²+1)', '43464143544f5210580d703111', '105871d711105870d711')
-case('NROOTS(X²-2)', '4e524f4f545310580d713211', '08b0313a3431343231333536322c313a34313432313335363209')
-case('POLYQUOTIENT(X²,2X+1)', '504f4c5951554f5449454e5410580d2b3258703111', '58833271318334')
-case('... in MathPrint', '504f4c5951554f5449454e5410580d2b3258703111', '58833271318334', mathprint=True)
-case('CZEROS(X²+X+1), MP', '435a45524f5310580d7058703111', '0810b03171bc3311d71183322c10b03170bc3311d711833209', mathprint=True)
-thrown('POLYQUOTIENT(X²,0)', '504f4c5951554f5449454e5410580d2b3011', b'DIVIDE BY 0\x00')
-thrown('POLYROOTS(0)', '504f4c59524f4f5453103011', b'ALWAYS TRUE\x00')
-thrown('POLYGCD(X), one argument', '504f4c59474344105811', b'ARGUMENT\x00POLYGCD')
-thrown('LEFT(X²), no =', '4c45465410580d11', b'SYNTAX\x00LEFT(A=B)')
-thrown('POLYROOTS(1/X)', '504f4c59524f4f54531031835811', b'DATA TYPE\x00POLYROOTS')
-thrown('CPOLYROOTS(X²+X+1), Classic', '43504f4c59524f4f545310580d7058703111', b'TOO WIDE\x00TRY MATHPRINT')
+case('POLYROOTS(X²-2)', 'bbc0bbbfbbbcbbc9bbc2bbbfbbbfbbc4bbc310580d713211', '08b0bc32112cbc321109')
+case('CPOLYROOTS(X²+1)', 'bbb2bbc0bbbfbbbcbbc9bbc2bbbfbbbfbbc4bbc310580d703111', '08b0d72cd709')
+case('CSOLVE(X²+1=0,X)', 'bbb2bbc3bbbfbbbcbbc6bbb410580d70316a302b5811', '586ab0d73c586ad7')
+case('CFACTOR(X²+1)', 'bbb2bbb5bbb0bbb2bbc4bbbfbbc210580d703111', '105871d711105870d711')
+case('NROOTS(X²-2)', 'bbbebbc2bbbfbbbfbbc4bbc310580d713211', '08b0313a3431343231333536322c313a34313432313335363209')
+case('POLYQUOTIENT(X²,2X+1)', 'bbc0bbbfbbbcbbc9bbc1bbc5bbbfbbc4bbb8bbb4bbbebbc410580d2b3258703111', '58833271318334')
+case('... in MathPrint', 'bbc0bbbfbbbcbbc9bbc1bbc5bbbfbbc4bbb8bbb4bbbebbc410580d2b3258703111', '58833271318334', mathprint=True)
+case('CZEROS(X²+X+1), MP', 'bbb2bbcabbb4bbc2bbbfbbc310580d7058703111', '0810b03171bc3311d71183322c10b03170bc3311d711833209', mathprint=True)
+thrown('POLYQUOTIENT(X²,0)', 'bbc0bbbfbbbcbbc9bbc1bbc5bbbfbbc4bbb8bbb4bbbebbc410580d2b3011', b'DIVIDE BY 0\x00')
+thrown('POLYROOTS(0)', 'bbc0bbbfbbbcbbc9bbc2bbbfbbbfbbc4bbc3103011', b'ALWAYS TRUE\x00')
+thrown('POLYGCD(X), one argument', 'bbc0bbbfbbbcbbc9bbb6bbb2bbb3105811', b'ARGUMENT\x00POLYGCD')
+thrown('LEFT(X²), no =', 'bbbcbbb4bbb5bbc410580d11', b'SYNTAX\x00LEFT(A=B)')
+thrown('POLYROOTS(1/X)', 'bbc0bbbfbbbcbbc9bbc2bbbfbbbfbbc4bbc31031835811', b'DATA TYPE\x00POLYROOTS')
+case('CPOLYROOTS(X²+X+1), wide', 'bbb2bbc0bbbfbbbcbbc9bbc2bbbfbbbfbbc4bbc310580d7058703111', '0810b03171bc3311d71183322c10b03170bc3311d711833209')   # 27 columns
 thrown("Ans*3 after a list", "728233", b"SYMCE LIMIT\0ANS", last_ans=h("08b0322c3209"))
 # Its functions: sin( and ln( as tokens, cos( as the letters c o s, whose
 # 0xB2 (c) is not abs(: BC comes from the engine's count, 13 here.
-case('TEXPAND(sin(2X))', '54455850414e4410c232581111', '32c25811bbb2bbbfbbc3105811')
-case('TOLN(logBASE(X,3))', '544f4c4e10ef34582b331111', 'be581183be3311')
-case('TOSIN(cos(X)²)', '544f53494e10c458110d11', '3171c258110d')
-case('TCOLLECT(sin(X)cos(X)), MP', '54434f4c4c45435410c25811c4581111', 'c23258118332', mathprint=True)
-thrown('TOEXP(sin(X)), DEGREE', '544f45585010c2581111', b'MODE\0USE RADIAN', deg=True)
-thrown('TOLOGBASE(ln(X)), no base', '544f4c4f474241534510be581111', b'ARGUMENT\0TOLOGBASE')
+case('TEXPAND(sin(2X))', 'bbc4bbb4bbc8bbc0bbb0bbbebbb310c232581111', '32c25811bbb2bbbfbbc3105811')
+case('TOLN(logBASE(X,3))', 'bbc4bbbfbbbcbbbe10ef34582b331111', 'be581183be3311')
+case('TOSIN(cos(X)²)', 'bbc4bbbfbbc3bbb8bbbe10c458110d11', '3171c258110d')
+case('TCOLLECT(sin(X)cos(X)), MP', 'bbc4bbb2bbbfbbbcbbbcbbb4bbb2bbc410c25811c4581111', 'c23258118332', mathprint=True)
+thrown('TOEXP(sin(X)), DEGREE', 'bbc4bbbfbbb4bbc8bbc010c2581111', b'MODE\0USE RADIAN', deg=True)
+thrown('TOLOGBASE(ln(X)), no base', 'bbc4bbbfbbbcbbbfbbb6bbb1bbb0bbc3bbb410be581111', b'ARGUMENT\0TOLOGBASE')
 
 print("\n--- it refuses, and the OS behaves exactly as stock ---")
 for name, tok in [("prgmA", "5f41"), ("prgmZZZ", "5f5a5a5a"),
@@ -670,12 +671,13 @@ def elf_syms(path):
 MENU_DIR = os.path.join(ROOT, 'symce/obj/menu/')
 MSYM = elf_syms(MENU_DIR + '0x100000.elf')
 MBLOB = open(MENU_DIR + '0x100000.bin', 'rb').read()
-SAVE, SAVE_END, P = 0xD0EF00, 0xD13E00, 0xD40000 + 50 * 640 + 8
+SAVE, SAVE_END, P = 0xD0EF00, 0xD13D60, 0xD40000 + 50 * 640 + 8
 
 
-def codec(name, rows, lit=None, fits=True):
+def codec(name, rows, lit=None, black=()):
     """save_px then restore_px over `rows` (lists of RGB565 pixels, 4 per quad)
-    at P; the region must come back exact and neither may write outside its own."""
+    at P; the region must come back exact (the pixels `black` = (row, column) without room for a literal:
+    0x0000) and neither may write outside its own."""
     w4, h = len(rows[0]) // 4, len(rows)
     skip, lit = 640 - 8 * w4, lit or SAVE + 12 + w4 * h
     s = Sim(MBLOB, org=0x100000)
@@ -686,6 +688,8 @@ def codec(name, rows, lit=None, fits=True):
             s.w8(P + y * 640 + 2 * x, c); s.w8(P + y * 640 + 2 * x + 1, c >> 8)
             region |= {P + y * 640 + 2 * x, P + y * 640 + 2 * x + 1}
     want = {a: s.r8(a) for a in region}
+    for r, c in black:
+        want[P + r * 640 + 2 * c] = want[P + r * 640 + 2 * c + 1] = 0
 
     def call(fn):
         s.writes, s.ix, s.iy, sp = [], 0x5A5A5A, ez80sim.IY_OS, s.sp
@@ -701,16 +705,14 @@ def codec(name, rows, lit=None, fits=True):
         ok, w = call('_save_px')
         if any(not SAVE <= a < SAVE_END for a in w):
             return fail(name, "save_px wrote outside engineWork")
-        if bool(ok) != fits:
-            return fail(name, "save_px said %s" % ("fits" if ok else "full"))
-        if not fits:
-            return print("ok   %-24s refused, nothing past %06X" % (name, SAVE_END))
+        if not ok:
+            return fail(name, "save_px said full: it is lossy now")
         for a in region:
             s.w8(a, 0xA5)                               # the popup drew here
         _, w = call('_restore_px')
     except Trap as ex:
         return fail(name, ex)
-    if any(a not in region for a in w):
+    if any(a not in region and not lit + 33 <= a < lit + 36 for a in w):      # (its index pointer lives at lit + 33)
         return fail(name, "restore_px wrote outside the region")
     bad = [a for a in region if s.r8(a) != want[a]]
     if bad:
@@ -724,8 +726,14 @@ codec("codec: one colour", [[W] * 8] * 3)
 # the all-colour-0 fast path; then two more colours, then literals.
 codec("codec: three colours", [[W, W, W, K, W, 0xFF7F, W, W], [G, K, W, G, K, K, K, K]])
 codec("codec: literals", [[W, R, K, B, G, R, 0x1234, W], [R] * 8, [W, W, W, W, B, W, R, W]])
-codec("codec: last literal fits", [[W, K, G, R, W, W, W, B]], lit=SAVE_END - 4)
-codec("codec: literal overflow", [[W, K, G, R, W, B, W, 0x1234]], lit=SAVE_END - 4, fits=False)
+# the literal header takes 36 bytes at lit, then one index byte a literal pixel: lit = SAVE_END - 37 - k holds k of them
+codec("codec: last literal fits", [[W, K, G, R, W, W, W, B]], lit=SAVE_END - 37 - 2)
+codec("codec: literal overflow", [[W, K, G, R, W, B, W, 0x1234]], lit=SAVE_END - 37 - 2, black=[(0, 7)])
+# 3 colours, then literal pixels one after another across the limit: the first 10 are kept, the rest black
+codec("codec: running out", [[W, K, G] + [0x1000 + i for i in range(5)] + [0x2000 + i for i in range(8)] + [0x3000 + i for i in range(8)] + [W] * 8], lit=SAVE_END - 37 - 10, black=[(0, c) for c in range(13, 24)])
+codec("codec: all overflow", [[W, K, G, R, B, 0x1234, 0x4321, W], [R, B, 0x1234] * 2 + [W, W]], lit=SAVE_END - 37, black=[(0, 3), (0, 4), (0, 5), (0, 6), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5)])
+# the table holds 16 colours: the 17th, with room to spare, is black; the 16 before it and a repeat of one are kept
+codec("codec: 17th colour", [[W, K, G] + [0x1000 + i for i in range(16)] + [0x1000, 0x1001, 0x1002, 0x1003, 0x1004] + [0x1010, W, W, W], [W] * 28], black=[(0, 24)])
 
 print("\n--- the font hook and the localize hook (fhook.bin, lhook.bin) ---")
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
@@ -734,7 +742,7 @@ LARGE, SMALL = mkfont.load()
 FSLOT, LSLOT, MAP_AT, REC_AT = 0xD025ED, 0xD02611, 0x120000, 0x121000
 
 
-def fontcase(name, binname, slot, a, b, code_ok, recs, rec_size, dest, width, hl_out):
+def fontcase(name, binname, slot, a, b, code_ok, recs, rec_size, dest, width, hl_out, flag=1):
     """One call, entered as the OS does. The table is mkfont's own, put where
     the two trailer words say. A hit: Z, HL = the record's address, 28/25 bytes
     there equal the table, B kept. Anything else: NZ, every register as it came."""
@@ -743,6 +751,7 @@ def fontcase(name, binname, slot, a, b, code_ok, recs, rec_size, dest, width, hl
     s = Sim(body)
     s.w24(s.org + len(body), MAP_AT)
     s.w24(s.org + len(body) + 3, REC_AT - rec_size)
+    s.w8(s.org + len(body) + 6, flag)   # fhook only: 1 = Evo glyphs too, 0 = the insert-cursor bar only
     for c in range(256):
         s.mem[MAP_AT + c] = mkfont.CODES.index(c) + 1 if c in recs else 0
     for i, c in enumerate(mkfont.CODES):
@@ -769,8 +778,8 @@ def fontcase(name, binname, slot, a, b, code_ok, recs, rec_size, dest, width, hl
             return fail(name, "width byte 0x%02X, want %02X" % (s.r8(0xD005A4), width))
         print("ok   %-24s Z, HL=%06X, record == table" % (name, s.hl))
     else:
-        if s.fz or (s.hl, s.de, s.c) != (0x123456, 0x654321, 0x33) or s.writes:
-            return fail(name, "miss must be NZ, regs kept, no writes")
+        if s.fz or (s.hl, s.de, s.c) != (0x123456, 0x654321, 0x33) or [w for w in s.writes if w != (0xD0EE08, 0)]:
+            return fail(name, "miss must be NZ, regs kept, no writes (but colMode := 0, the idle value)")
         print("ok   %-24s NZ, regs kept" % name)
 
 
@@ -779,6 +788,42 @@ for nm, code in [("A", 0x41), ("theta 0x5B", 0x5B), ("pi 0xC4", 0xC4), ("0x21 !"
 for nm, code in [("0x20 space", 0x20), ("0x01", 0x01), ("0xFF", 0xFF)]:
     fontcase("font miss " + nm, 'fhook.bin', FSLOT, 1, code, False, LARGE, 28, 0, 0, 0)
 fontcase("font A=2 (TRACE width)", 'fhook.bin', FSLOT, 2, 0x41, False, LARGE, 28, 0, 0, 0)
+fontcase("font miss A, cursor-only", 'fhook.bin', FSLOT, 1, 0x41, False, LARGE, 28, 0, 0, 0, flag=0)
+
+
+def cursorcase(name, g, flag):
+    """0xE4..0xE7 with either flag: the ROM glyph (a made-up one at 0x3D6E) with
+    the underline rows (12, 13) cleared and a 2 px bar (byte 0 bits 7, 6) on all 14 rows."""
+    body = load_hook(os.path.join(ROOT, 'symce/obj/hook/fhook.bin'), os.path.join(ROOT, 'symce/bin/SYMCE1.8xv'))
+    s = Sim(body)
+    s.w24(s.org + len(body), MAP_AT)
+    s.w24(s.org + len(body) + 3, REC_AT - 28)
+    s.w8(s.org + len(body) + 6, flag)
+    rom = [(i * 7 + g) & 0xFF or 1 for i in range(28)]
+    for j, v in enumerate(rom):
+        s.mem[0x3D6E + g * 28 + j] = v
+    want = bytearray(rom)
+    want[24:28] = bytes(4)
+    for r in range(14):
+        want[2 * r] |= 0xC0
+    s.w24(FSLOT, s.org)
+    s.a, s.b, s.pc, s.ix, s.iy = 1, g, s.org + 1, s.org + 1, ez80sim.IY_OS
+    s.hl, s.de, s.c = g * 28, 0x654321, 0x33
+    s.w8(0xD005A4, 0x0C)
+    sp = s.sp
+    try:
+        s.run()
+    except Trap as ex:
+        return fail(name, ex)
+    got = bytes(s.r8(0xD005A5 + i) for i in range(28))
+    if s.sp != sp or s.b != g or not s.fz or s.hl != 0xD005A1 or got != want or s.r8(0xD005A4) != 0:
+        return fail(name, "Z=%s HL=%06X record %s" % (s.fz, s.hl, "ok" if got == want else got.hex()))
+    print("ok   %-24s Z, bar + ROM glyph minus underline" % name)
+
+
+for g in (0xE4, 0xE5, 0xE6, 0xE7):
+    for flag in (0, 1):
+        cursorcase("cursor 0x%02X flag %d" % (g, flag), g, flag)
 for nm, code in [("A", 0x41), ("W", 0x57), ("not-equal 0x18", 0x18)]:
     fontcase("loc hit " + nm, 'lhook.bin', LSLOT, 0x75, code, True, SMALL, 25, 0xD005C5, None, 0xD005C5)
 for nm, code in [("0x20 space", 0x20), ("0xFF", 0xFF)]:

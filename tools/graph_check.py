@@ -15,6 +15,7 @@ import math, os, random, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "..", "symce", "bin", "host", "graph_cli")
+ICLI = os.path.join(HERE, "..", "symce", "bin", "host", "implicit_cli")
 
 TOK = {'+': [0x70], '-': [0x71], '*': [0x82], '/': [0x83], '^': [0xF0], '~': [0xB0],
        '(': [0x10], ')': [0x11], 'sq': [0x0D], 'cu': [0x0F], 'inv': [0x0C], '.': [0x3A],
@@ -200,6 +201,66 @@ def cmp_xs(cli, tokens, f, xs, deg=False, var=None):
     return bad, first
 
 
+# implicit equations and inequalities (a Yn with a Y whose last operation is a relation): tokens, f(x, y) = the
+# amount by which the relation holds (>= 0 on the inside), and the kind: "=" a solid curve, "<=" a solid boundary
+# and a tinted inside, "<" a dashed boundary and a tinted inside
+IMPLICIT = [
+    ("implicit: X^2+Y^2=25", "X sq + Y sq = 2 5", lambda x, y: x * x + y * y - 25, "="),
+    ("implicit: X^2/9-Y^2/4=1", "X sq / 9 - Y sq / 4 = 1", lambda x, y: x * x / 9 - y * y / 4 - 1, "="),
+    ("implicit: X*Y=1 (two branches)", "X * Y = 1", lambda x, y: x * y - 1, "="),
+    ("implicit: Y=sin(X)", "Y = sin( X )", lambda x, y: y - math.sin(x), "="),
+    ("implicit: Y>X^2 (dashed)", "Y > X sq", lambda x, y: y - x * x, "<"),
+    ("implicit: X^2+Y^2<=9", "X sq + Y sq <= 9", lambda x, y: 9 - x * x - y * y, "<="),
+    ("implicit: Y<X-3 (dashed)", "Y < X - 3", lambda x, y: x - 3 - y, "<"),
+    ("implicit: Y>=X and Y<=4", "Y >= X and Y <= 4", lambda x, y: min(y - x, 4 - y), "<=", [(4, 4)]),
+    ("implicit: Y>X^2 or Y<-5", "Y > X sq or Y < ~ 5", lambda x, y: max(y - x * x, -5 - y), "<", [(2.236, -5), (-2.236, -5)]),
+    ("implicit: X>0 and X^2+Y^2<=16", "X > 0 and X sq + Y sq <= 1 6", lambda x, y: min(x, 16 - x * x - y * y), "<", [(0, 4), (0, -4)]),
+]
+WHITE, PEN = 0xFFFF, 0x001F
+
+
+def kink_skip(kinks):
+    """skip(): within 13 px of a corner of the region (where and / or meet two curves: min / max of f is not
+    linear there and a cell of 8 px cuts it by a few pixels)."""
+    return lambda c, r: any((c - (x + 10) * 318 / 20) ** 2 + (r - (10 - y) * 239 / 20) ** 2 < 169 for x, y in kinks)
+
+
+def implicit_pixels(px, f, kind, pen=PEN, skip=lambda c, r: False):
+    """The picture px(c, r) of an implicit equation against the sign of f at the pixels: a solid curve is drawn
+    within 13 px of every place f changes sign (no gap), a dashed one has pen pixels; an inequality tints the
+    pixels well inside it and leaves those well outside it white (not those skip() names: the axes).
+    Returns (bad, first)."""
+    sg = lambda c, r_: f(-10 + c * 20 / 318, 10 - r_ * 20 / 239) >= 0
+    bad, first, n = 0, "", 0
+    for r_ in range(3, 236):
+        for c in range(3, 316):
+            n += px(c, r_) == pen
+            if skip(c, r_):
+                continue
+            ring = {sg(c + a, r_ + b) for a in (-2, 0, 2) for b in (-2, 0, 2)}
+            if len(ring) == 2:                    # the curve is within 13 px
+                if kind != "<" and not any(px(c + a, r_ + b) == pen for a in range(-3, 4) for b in range(-3, 4)):
+                    bad += 1
+                    first = first or "gap at %d,%d" % (c, r_)
+            elif kind != "=" and (px(c, r_) == WHITE) == (ring == {True}):
+                bad += 1
+                first = first or "pixel %d,%d is %04X, inside=%s" % (c, r_, px(c, r_), ring == {True})
+    if not n:
+        bad, first = bad + 1, "no curve"
+    return bad, first
+
+
+def implicit_case(tk, f, kind, kinks=()):
+    """graph.c's idraw on the host (implicit_cli) against implicit_pixels. Returns (bad, first)."""
+    import struct
+    raw = os.path.join(os.environ.get("TMPDIR", "/tmp"), "implicit_check.raw")
+    r = subprocess.run([ICLI, bytes(toks(tk)).hex(), "0x%04X" % PEN, raw], capture_output=True, text=True)
+    if r.returncode:
+        return 1, "implicit_cli: %r" % r.stdout
+    d = open(raw, "rb").read()
+    return implicit_pixels(lambda x, y: struct.unpack_from("<H", d, 2 * (y * 320 + x))[0], f, kind, PEN, kink_skip(kinks))
+
+
 def main():
     if not os.path.exists(CLI):
         sys.exit("build it first: make -C symce bin/host/graph_cli")
@@ -308,6 +369,9 @@ def main():
                 bad += 1
                 first = first or "%s: %s" % (n[0], f1)
     report("random trees (%d)" % tot, bad, first)
+
+    for name, tk, f, rel, *kinks in IMPLICIT:
+        report(name, *implicit_case(tk, f, rel, kinks[0] if kinks else ()))
 
     print("\nALL PASS" if not fail else "\n%d FAILED" % fail)
     return 1 if fail else 0

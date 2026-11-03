@@ -26,27 +26,65 @@ STOCK = os.environ.get("AUTOTESTER_ROM", os.path.expanduser("~/CEdev/ti84pce.rom
 TESTER = os.path.expanduser("~/CEdev/bin/cemu-autotester")
 
 
+def installed(img, dest):
+    """The image as the installer leaves it at `dest`: every relocation table
+    entry (where, what; both relative to the code) patched."""
+    b = bytearray(img)
+    le = lambda i: int.from_bytes(b[i:i + 3], "little")
+    code = 256 + le(256 + 0x12)
+    for e in range(298, code, 6):
+        where, what = le(e), le(e + 3)
+        b[code + where:code + where + 3] = (dest + code + what).to_bytes(3, "little")
+    return bytes(b)
+
+
 def roomy(stock):
     """The ROM without its dumper's ROMData appvars, each alone in a sector
     (entry at byte 1): ~830 KB a user's calculator does not hold, which left
     no room for SymCE past 69 KB with its appvars archived."""
-    out = os.path.join(HERE, "_base.rom")
+    # SYMCE_ROOMY_TO=0x2E91E7 (test only): also erase every app below that address (an app
+    # boundary), for installs of 11-16 parts, which a stock CE only holds with TI's apps deleted.
+    to = int(os.environ.get("SYMCE_ROOMY_TO", "0"), 0)
+    out = os.path.join(HERE, "_base2%s.rom" % ("_%X" % to if to else ""))
     if os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(stock):
         return out
     b = bytearray(open(stock, "rb").read())
+    # The dumper's other archived vars (0x0C..0x13: ROMData, PCAS, TITOL, GDGrphcs, DEMONEW, an old
+    # SYMCE) are junk too: an 8- or 9-part app needs its appvars AND the app in the blank run
+    # (1 sector per appvar + the app, ~17 of 21), which 0x14..0x1F alone (13) cannot hold.
+    b[0x0C * 0x10000:0x14 * 0x10000] = b"\xff" * (8 * 0x10000)
     for s in range(0x0C, 0x40):
         at, top = s * 0x10000, (s + 1) * 0x10000
         end = at + 4 + int.from_bytes(b[at + 2:at + 4], "little")
         if b[at + 11:at + 18] == b"ROMData" and b[end:top] == b"\xff" * (top - end):
             b[at:top] = b"\xff" * (top - at)
+    if to:
+        hook = bytes(b[0x224040:0x22444F])          # AsmHook2: the tests open it from APPS, so it stays,
+        b[0x0C * 0x10000:to] = b"\xff" * (to - 0x0C * 0x10000)
+        b[to - len(hook):to] = installed(hook, to - len(hook))      # relocated, lowest app
     open(out, "wb").write(b)
     return out
 
 
 ROM = roomy(STOCK)
 
+# Commands are lowercase tokens, so the home screen shows factor( where the tests were
+# written for FACTOR(. A range named "screen" (the textShadow) comes back with command
+# names in capitals, so the expectations stay; "screen_raw" is the same range untouched.
+_c = open(os.path.join(HERE, "..", "..", "symce", "src", "engine.c")).read().split("static const char cmds[] =")[1].split(";")[0]
+CMDNAMES = sorted(set(re.findall(r"[A-Z]+", _c.replace("\\0", " "))), key=len, reverse=True)
+
+
+def upper_cmds(b):
+    for n in CMDNAMES:
+        b = b.replace(n.lower().encode() + b"(", n.encode() + b"(")
+    return b
+
 TEXTSHADOW = 0xD006C0
 COLS, ROWS = 26, 10
+
+
+HOLD_MS = int(os.environ.get("SYMCE_HOLD_MS", 200))      # how long every plain key is held
 
 
 def read(ranges, keys="", files=("arTIfiCE.8xp",), launch="A", asm=False,
@@ -58,6 +96,7 @@ def read(ranges, keys="", files=("arTIfiCE.8xp",), launch="A", asm=False,
     length) ranges hashed whole: {name: CRC} or None, for comparing a region
     too big to read (VRAM) between two runs. `rom` is the flash image to boot.
     """
+    dstep = 1 if crcs else step
     seq = ["delay|%d" % boot]
     if launch and lead:
         seq += ["action|launch", "delay|4000"]
@@ -78,7 +117,15 @@ def read(ranges, keys="", files=("arTIfiCE.8xp",), launch="A", asm=False,
             # answer reads back as a blank buffer.
             seq += ["action|useClassic", "delay|1500"]
         else:
-            seq += ["key|" + k, "delay|%d" % per_key]
+            # key|k is down for delay_after_step ms; at 1 (VRAM reads, so every vram.grab / mathprint run) that is a 1 ms
+            # tap, and the OS needs 5 keypad polls (one per halt wake-up, ~10 ms apart) to accept a key. MathPrint's rainbow
+            # paren pass (fhook.c .Lcpass, ~5 ms at each cursor blink) can swallow a wake-up, the tap then misses its 5th
+            # poll and the OS never sees the key: desolve.py lost the ( of Y'(0) (hook A=1 called 40 times for 41 keys),
+            # DESOLVE( got ERR:SYNTAX, errNo 0xAB. So hold it 120 ms, as a finger does (a 40 ms hold still lost one).
+            # Every key is held, not only at delay_after_step 1: at 0 a key|k tap is the same dropped-poll lottery, and its
+            # phase moves with the image size (e2e MathPrint nested lost the `2nd` of `2nd math 1 0` at a 800 KB pad: `math 1`
+            # typed >Frac, token 03, for =, ERR:SYNTAX 0xAB; it passed at 700 KB and with per_key 310).
+            seq += ["hold|" + k, "delay|%d" % HOLD_MS, "release|" + k, "delay|%d" % per_key]
     seq += ["delay|%d" % settle]
 
     hashes, plan, n = {}, [], 0
@@ -105,11 +152,14 @@ def read(ranges, keys="", files=("arTIfiCE.8xp",), launch="A", asm=False,
     # assertion after ~230 windows of 0xD40000.
     cfg = {"transfer_files": list(files),
            "target": {"name": launch or "A", "isASM": asm},
-           "delay_after_step": 1 if crcs else step, "sequence": seq, "hashes": hashes}
-    path = os.path.join(HERE, "_screen.json")
+           "delay_after_step": dstep, "sequence": seq, "hashes": hashes}
+    path = os.path.join(HERE, "_screen.%d.json" % os.getpid())     # per process: two tests at once must not share a config
     json.dump(cfg, open(path, "w"))
-    r = subprocess.run([TESTER, path], capture_output=True, text=True,
-                       env=dict(os.environ, AUTOTESTER_ROM=rom), cwd=HERE)
+    try:
+        r = subprocess.run([TESTER, path], capture_output=True, text=True,
+                           env=dict(os.environ, AUTOTESTER_ROM=rom), cwd=HERE)
+    finally:
+        os.remove(path)
     # An unknown key name is SKIPPED, not rejected -- the run continues and
     # returns a plausible CRC for a sequence that never happened.
     if "unknown key" in r.stderr:
@@ -128,6 +178,7 @@ def read(ranges, keys="", files=("arTIfiCE.8xp",), launch="A", asm=False,
         out[name] += (crcread.invert(int(got[key], 16), chunk)
                       if key in got else b"\xff" * chunk)
     out = {k: bytes(v) for k, v in out.items()}
+    if "screen" in out: out["screen"] = upper_cmds(out["screen"])
     out.update((name, int(got[name], 16) if name in got else None) for name, _, _ in crcs)
     return out
 
