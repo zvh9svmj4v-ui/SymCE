@@ -6,3 +6,5 @@ plugins:
 exclude:
   - symce
   - tools
+webmaster_verifications:
+  google: 6BzFg6g0q7SBmefItuMaNZ9IE50H-jAxAqNRoRkPSu8
