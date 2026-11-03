@@ -204,7 +204,7 @@ static uint8_t sub(const char *s)               /* the menu item s opens, or 0 *
    (the examples' answers are what it prints); \x10( is the root sign, \xD7 the
    imaginary i. A line past 9 in all would not fit the screen. */
 static const char H[] =
-    "SOLVE(\0" "SOLVE(eq,var)\nSOLVE({eq,..},{var,..})\0" "Exact solutions of an\nequation or inequality\n(< > \xC9 \xCA \xCB); lists of\nequations make a system.\0"
+    "SOLVE(\0" "SOLVE(eq,var)\nSOLVE({eq,..},{var,..})\0" "Exact solutions of an\nequation or inequality\n(< > \x17 \x19 \x18); lists of\nequations make a system.\0"
         "SOLVE({X+Y=3,X=2Y},{X,Y})\n-> X=2 and Y=1\0"
     "FACTOR(\0" "FACTOR(expr)\0" "Factors a polynomial or an\ninteger.\0"
         "FACTOR(X^2-4)\n-> (X-2)(X+2)\0"
